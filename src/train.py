@@ -1,218 +1,180 @@
+from typing import List
+
 import torch
-import torch.optim as optim
 import torch.nn.functional as F
-import os
-import numpy as np
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
-from data_loader import load_twitch_domain
-from gnn_extractor import GNNExtractor
-from classifier import NodeClassifier
-from discriminator import DomainDiscriminator
-from losses import sampled_gromov_wasserstein_loss
+from torch_geometric.data import Data
+from torch_geometric.utils import dropout_edge
 
-# -- Hyperparameters --
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-LEARNING_RATE = 0.001
-EPOCHS = 200
-HIDDEN_DIM = 64
-EMBEDDING_DIM = 32
-NUM_CLASSES = 2
-ALPHA = 0.5  # Adversarial loss weight
-BETA = 0.1   # OT loss weight
-OT_SAMPLE_SIZE = 500  # Sample size for OT computation
-OT_UPDATE_FREQ = 5  # Update OT loss every N epochs
+from .config import Config
+from .models import CausalGNN_DANN
+from .utils import compute_metrics, grl_lambda_schedule
 
-# Source and target domains
-SOURCE_DOMAIN = 'ENGB'  # English domain
-TARGET_DOMAIN = 'FR'    # French domain
 
-print(f"Using device: {DEVICE}")
-print(f"Source domain: {SOURCE_DOMAIN}, Target domain: {TARGET_DOMAIN}")
+_EPS = 1e-6
 
-# -- 1. Load Data --
-print("\n=== Loading Data ===")
-data_path = '/Users/mohammad/Desktop/Domain-Adaptation/data'
 
-print(f"Loading source domain ({SOURCE_DOMAIN})...")
-source_data, source_adj = load_twitch_domain(data_path, SOURCE_DOMAIN, use_labels=True)
-source_data = source_data.to(DEVICE)
-
-print(f"Loading target domain ({TARGET_DOMAIN})...")
-target_data, target_adj = load_twitch_domain(data_path, TARGET_DOMAIN, use_labels=True)
-target_data = target_data.to(DEVICE)
-
-print(f"Source: {source_data.num_nodes} nodes, {source_data.edge_index.shape[1]} edges, "
-      f"{source_data.x.shape[1]} features")
-print(f"Target: {target_data.num_nodes} nodes, {target_data.edge_index.shape[1]} edges, "
-      f"{target_data.x.shape[1]} features")
-print(f"Number of classes: {NUM_CLASSES}")
-
-# Check feature dimensions match
-if source_data.x.shape[1] != target_data.x.shape[1]:
-    print(f"Warning: Feature dimensions don't match! Source: {source_data.x.shape[1]}, "
-          f"Target: {target_data.x.shape[1]}")
-    # Pad the smaller one with zeros
-    max_features = max(source_data.x.shape[1], target_data.x.shape[1])
-    if source_data.x.shape[1] < max_features:
-        padding = torch.zeros(source_data.num_nodes, max_features - source_data.x.shape[1]).to(DEVICE)
-        source_data.x = torch.cat([source_data.x, padding], dim=1)
-    if target_data.x.shape[1] < max_features:
-        padding = torch.zeros(target_data.num_nodes, max_features - target_data.x.shape[1]).to(DEVICE)
-        target_data.x = torch.cat([target_data.x, padding], dim=1)
-
-INPUT_DIM = source_data.x.shape[1]
-
-# # -- 2. Initialize Models --
-print("\n=== Initializing Models ===")
-feature_extractor = GNNExtractor(INPUT_DIM, HIDDEN_DIM, EMBEDDING_DIM).to(DEVICE)
-classifier = NodeClassifier(EMBEDDING_DIM, NUM_CLASSES).to(DEVICE)
-discriminator = DomainDiscriminator(EMBEDDING_DIM, HIDDEN_DIM).to(DEVICE)
-
-print(f"GNN Extractor: {INPUT_DIM} -> {HIDDEN_DIM} -> {EMBEDDING_DIM}")
-print(f"Classifier: {EMBEDDING_DIM} -> {NUM_CLASSES}")
-print(f"Discriminator: {EMBEDDING_DIM} -> {HIDDEN_DIM} -> 1")
-
-# -- 3. Setup Optimizer --
-optimizer = optim.Adam(
-    list(feature_extractor.parameters()) + 
-    list(classifier.parameters()) + 
-    list(discriminator.parameters()),
-    lr=LEARNING_RATE
-)
-
-# # -- 4. Training Loop --
-print("\n=== Starting Training ===")
-print(f"Epochs: {EPOCHS}, Learning Rate: {LEARNING_RATE}")
-print(f"Loss weights - Alpha (adversarial): {ALPHA}, Beta (OT): {BETA}")
-print(f"OT sampling: {OT_SAMPLE_SIZE} nodes, computed every {OT_UPDATE_FREQ} epochs\n")
-
-best_target_acc = 0.0
-loss_ot_cached = torch.tensor(0.0, device=DEVICE)
-
-for epoch in range(EPOCHS):
-    feature_extractor.train()
-    classifier.train()
-    discriminator.train()
-    
-    optimizer.zero_grad()
-    
-    # --- Forward Passes ---
-    # Source domain
-    source_features = feature_extractor(source_data.x, source_data.edge_index)
-    source_preds = classifier(source_features)
-    source_domain_preds = discriminator(source_features, alpha=ALPHA)
-
-    # Target domain
-    target_features = feature_extractor(target_data.x, target_data.edge_index)
-    target_domain_preds = discriminator(target_features, alpha=ALPHA)
-
-    # --- Loss Calculation ---
-    # 1. Classification Loss (on source domain only)
-    loss_cls = F.cross_entropy(source_preds, source_data.y)
-
-    # 2. Adversarial Loss (Domain Discriminator)
-    # Discriminator should predict 1 for source, 0 for target
-    # But GRL makes feature extractor try to confuse it
-    loss_adv = F.binary_cross_entropy(
-        torch.cat([source_domain_preds, target_domain_preds]),
-        torch.cat([
-            torch.ones_like(source_domain_preds), 
-            torch.zeros_like(target_domain_preds)
-        ])
+def _drop_edges(edge_index: torch.Tensor, p: float) -> torch.Tensor:
+    if p <= 0.0:
+        return edge_index
+    new_ei, _ = dropout_edge(
+        edge_index, p=p, force_undirected=True, training=True,
     )
-    
-    # 3. Optimal Transport Loss (Structure-level alignment)
-    # Compute periodically to save time
-    if epoch % OT_UPDATE_FREQ == 0:
-        with torch.no_grad():
-            try:
-                loss_ot_cached = sampled_gromov_wasserstein_loss(
-                    source_adj, target_adj, sample_size=OT_SAMPLE_SIZE
-                ).to(DEVICE)
-            except Exception as e:
-                print(f"Warning: OT computation failed at epoch {epoch}: {e}")
-                loss_ot_cached = torch.tensor(0.0, device=DEVICE)
-    
-    loss_ot = loss_ot_cached
+    return new_ei
 
-    # --- Total Loss ---
-    total_loss = loss_cls + ALPHA * loss_adv + BETA * loss_ot
-    
-    # --- Backward Pass & Optimization ---
-    total_loss.backward()
+
+def _binary_entropy(w: torch.Tensor) -> torch.Tensor:
+    """Per-edge binary entropy: 0 at w=0 or w=1, max at w=0.5.
+
+    Penalising this term pushes each weight toward a confident 0 (drop)
+    or 1 (keep) rather than collapsing the whole mask to zero.
+    """
+    return -(w * (w + _EPS).log() + (1.0 - w) * (1.0 - w + _EPS).log())
+
+
+def train_step(
+    model: CausalGNN_DANN,
+    sources: List[Data],
+    target: Data,
+    optimizer: torch.optim.Optimizer,
+    config: Config,
+    epoch: int,
+) -> dict:
+    """One full-batch pass over every source and the target graph.
+
+    Domain labels: source_i -> i,  target -> len(sources).
+    """
+    model.train()
+    alpha = grl_lambda_schedule(epoch, config.grl_warmup_epochs)
+    device = target.x.device
+    num_sources = len(sources)
+
+    label_losses = []
+    domain_losses = []
+    sparsity_terms = []
+    counter_losses = []
+    per_source_metrics = []
+
+    for i, src in enumerate(sources):
+        ei = _drop_edges(src.edge_index, config.drop_edge_p)
+
+        logits_s, dom_s, w_s = model(src.x, ei, alpha)
+        ce_pos = F.cross_entropy(logits_s, src.y)
+        label_losses.append(ce_pos)
+
+        dom_label = torch.full(
+            (src.num_nodes,), i, dtype=torch.long, device=device,
+        )
+        domain_losses.append(F.cross_entropy(dom_s, dom_label))
+
+        sparsity_terms.append(_binary_entropy(w_s).mean())
+
+        # Counterfactual: the kept edges (mask w) should be more useful for
+        # predicting y than the anti-mask (1 - w). Hinge: anti-mask CE must
+        # be at least `counter_margin` nats worse than the regular CE.
+        logits_anti = model.predict_with_weights(src.x, ei, 1.0 - w_s)
+        ce_anti = F.cross_entropy(logits_anti, src.y)
+        counter_losses.append(
+            F.relu(ce_pos.detach() - ce_anti + config.counter_margin)
+        )
+
+        per_source_metrics.append(compute_metrics(logits_s, src.y))
+
+    # target: only domain loss + sparsity (no labels used)
+    ei_t = _drop_edges(target.edge_index, config.drop_edge_p)
+    _, dom_t, w_t = model(target.x, ei_t, alpha)
+    dom_label_t = torch.full(
+        (target.num_nodes,), num_sources, dtype=torch.long, device=device,
+    )
+    domain_losses.append(F.cross_entropy(dom_t, dom_label_t))
+    sparsity_terms.append(_binary_entropy(w_t).mean())
+
+    loss_label = torch.stack(label_losses).mean()
+    loss_domain = torch.stack(domain_losses).mean()
+    loss_sparse = torch.stack(sparsity_terms).mean()
+    loss_counter = torch.stack(counter_losses).mean()
+    # V-REx: penalise variance of per-source risks so the predictor has to
+    # be (near-)optimal on every source simultaneously — a proxy for using
+    # only invariant (causal) features. Biased var so single-source gives 0.
+    loss_vrex = torch.stack(label_losses).var(unbiased=False)
+
+    loss = (
+        loss_label
+        + config.lambda_domain * loss_domain
+        + config.lambda_sparse * loss_sparse
+        + config.lambda_counter * loss_counter
+        + config.lambda_vrex * loss_vrex
+    )
+
+    optimizer.zero_grad()
+    loss.backward()
     optimizer.step()
 
-    # --- Logging and Evaluation ---
-    if epoch % 10 == 0:
-        feature_extractor.eval()
-        classifier.eval()
-        
-        with torch.no_grad():
-            # Evaluate on source domain (sanity check)
-            source_eval_features = feature_extractor(source_data.x, source_data.edge_index)
-            source_eval_preds = classifier(source_eval_features)
-            source_pred_labels = source_eval_preds.argmax(dim=1).cpu().numpy()
-            source_true_labels = source_data.y.cpu().numpy()
-            source_acc = accuracy_score(source_true_labels, source_pred_labels)
-            
-            # Evaluate on target domain
-            target_eval_features = feature_extractor(target_data.x, target_data.edge_index)
-            target_eval_preds = classifier(target_eval_features)
-            target_pred_labels = target_eval_preds.argmax(dim=1).cpu().numpy()
-            target_true_labels = target_data.y.cpu().numpy()
-            target_acc = accuracy_score(target_true_labels, target_pred_labels)
-            target_f1 = f1_score(target_true_labels, target_pred_labels, average='binary')
-            
-            # Track best target accuracy
-            if target_acc > best_target_acc:
-                best_target_acc = target_acc
-        
-        print(f"Epoch {epoch:03d} | "
-              f"Total: {total_loss:.4f} | "
-              f"Cls: {loss_cls:.4f} | "
-              f"Adv: {loss_adv:.4f} | "
-              f"OT: {loss_ot:.4f} | "
-              f"Src Acc: {source_acc:.3f} | "
-              f"Tgt Acc: {target_acc:.3f} | "
-              f"Tgt F1: {target_f1:.3f}")
+    return {
+        "loss": loss.item(),
+        "loss_label": loss_label.item(),
+        "loss_domain": loss_domain.item(),
+        "loss_sparse": loss_sparse.item(),
+        "loss_counter": loss_counter.item(),
+        "loss_vrex": loss_vrex.item(),
+        "alpha": alpha,
+        "src_f1_mean": sum(m["f1"] for m in per_source_metrics) / num_sources,
+        "per_source_metrics": per_source_metrics,
+    }
 
-print("\n=== Training Finished! ===")
-print(f"Best Target Accuracy: {best_target_acc:.4f}")
 
-# -- 5. Final Evaluation on Target Domain --
-print("\n=== Final Evaluation on Target Domain ===")
-feature_extractor.eval()
-classifier.eval()
+@torch.no_grad()
+def evaluate(model: CausalGNN_DANN, data: Data) -> dict:
+    model.eval()
+    logits, _, edge_weights = model(data.x, data.edge_index, alpha=0.0)
+    loss = F.cross_entropy(logits, data.y).item()
+    metrics = compute_metrics(logits, data.y)
+    metrics["loss"] = loss
+    metrics["avg_edge_weight"] = float(edge_weights.mean().item())
+    return metrics
 
-with torch.no_grad():
-    target_features = feature_extractor(target_data.x, target_data.edge_index)
-    target_preds = classifier(target_features)
-    target_pred_labels = target_preds.argmax(dim=1).cpu().numpy()
-    target_probs = F.softmax(target_preds, dim=1)[:, 1].cpu().numpy()
-    target_true_labels = target_data.y.cpu().numpy()
-    
-    accuracy = accuracy_score(target_true_labels, target_pred_labels)
-    f1 = f1_score(target_true_labels, target_pred_labels, average='binary')
-    
-    try:
-        auc = roc_auc_score(target_true_labels, target_probs)
-        print(f"Accuracy: {accuracy:.4f}")
-        print(f"F1-Score: {f1:.4f}")
-        print(f"AUC-ROC: {auc:.4f}")
-    except:
-        print(f"Accuracy: {accuracy:.4f}")
-        print(f"F1-Score: {f1:.4f}")
-        print("AUC-ROC: N/A (only one class present)")
 
-# # Save the trained models
-# print("\n=== Saving Models ===")
-# models_dir = '/Users/mohammad/Desktop/Domain-Adaptation/models'
-# os.makedirs(models_dir, exist_ok=True)
+def run_training(
+    model: CausalGNN_DANN,
+    sources: List[Data],
+    target: Data,
+    config: Config,
+) -> CausalGNN_DANN:
+    device = config.device
+    sources = [s.to(device) for s in sources]
+    target = target.to(device)
+    model = model.to(device)
 
-# torch.save(feature_extractor.state_dict(), 
-#           f'{models_dir}/feature_extractor_{SOURCE_DOMAIN}_to_{TARGET_DOMAIN}.pt')
-# torch.save(classifier.state_dict(), 
-#           f'{models_dir}/classifier_{SOURCE_DOMAIN}_to_{TARGET_DOMAIN}.pt')
+    optimizer = torch.optim.Adam(
+        model.parameters(), lr=config.lr, weight_decay=config.weight_decay,
+    )
 
-# print(f"Models saved to {models_dir}/")
-print("\nDone!")
+    best_tgt_f1 = -1.0
+    best_state = None
+
+    for epoch in range(1, config.epochs + 1):
+        stats = train_step(model, sources, target, optimizer, config, epoch)
+        tgt = evaluate(model, target)
+
+        if epoch == 1 or epoch % 10 == 0 or epoch == config.epochs:
+            print(
+                f"Epoch {epoch:3d} | "
+                f"loss {stats['loss']:.4f} "
+                f"(lbl {stats['loss_label']:.4f}  "
+                f"dom {stats['loss_domain']:.4f}  "
+                f"sp {stats['loss_sparse']:.4f}  "
+                f"cf {stats['loss_counter']:.4f}  "
+                f"vx {stats['loss_vrex']:.4f}) | "
+                f"alpha {stats['alpha']:.3f} | "
+                f"mean src_f1 {stats['src_f1_mean']:.4f} | "
+                f"tgt_acc {tgt['acc']:.4f}  tgt_f1 {tgt['f1']:.4f}  "
+                f"tgt_auc {tgt['auc']:.4f}"
+            )
+
+        if tgt["f1"] > best_tgt_f1:
+            best_tgt_f1 = tgt["f1"]
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+        model = model.to(device)
+    return model
