@@ -52,10 +52,10 @@ class CausalGNN_DANN(nn.Module):
     ):
         super().__init__()
         self.input_proj = nn.Linear(in_dim, proj_dim)
-        self.masker = CausalEdgeMasker(proj_dim, hidden_dim)
-
         self.conv1 = GCNConv(proj_dim, hidden_dim)
         self.conv2 = GCNConv(hidden_dim, hidden_dim)
+
+        self.masker = CausalEdgeMasker(hidden_dim, hidden_dim)
 
         self.label_predictor = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
@@ -73,7 +73,9 @@ class CausalGNN_DANN(nn.Module):
 
     def encode(self, x: torch.Tensor, edge_index: torch.Tensor):
         h0 = F.relu(self.input_proj(x))
-        edge_weights = self.masker(h0, edge_index)
+
+        h1_probe = F.relu(self.conv1(h0, edge_index))
+        edge_weights = self.masker(h1_probe, edge_index)
 
         h = F.relu(self.conv1(h0, edge_index, edge_weights))
         h = self.conv2(h, edge_index, edge_weights)
