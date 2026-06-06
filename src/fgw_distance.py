@@ -30,22 +30,9 @@ def pairwise_fgw_distances(
 ) -> torch.Tensor:
     """Returns FGW distances of shape (B, C, M).
 
-    POT's FGW solver runs reliably on CPU (some kernels it relies on are
-    not implemented for MPS / GPU sparse), so we move the inputs to CPU
-    for the solve. PyTorch's `.cpu()` and `.to(device)` are both
-    differentiable, so gradients propagate back to the original-device
-    encoder / prototype parameters as if the solve had run in-place.
+    The solve runs in-place on whatever device the inputs already live on
+    (e.g. CUDA), so no host/device transfers are needed.
     """
-    orig_device = F_e.device
-    on_cpu = orig_device.type == "cpu"
-    if not on_cpu:
-        F_e = F_e.cpu()
-        C_e = C_e.cpu()
-        h_e = h_e.cpu()
-        F_p = F_p.cpu()
-        C_p = C_p.cpu()
-        q = q.cpu()
-
     B = F_e.shape[0]
     C_cls, M = F_p.shape[:2]
     out = F_e.new_zeros(B, C_cls, M)
@@ -75,4 +62,4 @@ def pairwise_fgw_distances(
                     )
                 out[b, c, m] = d
 
-    return out if on_cpu else out.to(orig_device)
+    return out
