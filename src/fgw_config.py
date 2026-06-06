@@ -36,8 +36,8 @@ class FGWConfig:
 
     # ------------------------------------------------------------ FGW solver
     fgw_alpha: float = 0.5        # trade-off between feature and structure
-    fgw_epsilon: Optional[float] = None  # >0 -> entropic Sinkhorn FGW
-    fgw_max_iter: int = 50
+    fgw_epsilon: Optional[float] = 0.05  # entropic Sinkhorn FGW regularisation
+    fgw_max_iter: int = 50        # outer block-coordinate (FGW) iterations
 
     # -------------------------------------------------- classifier soft-min
     tau: float = 0.5              # temperature

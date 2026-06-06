@@ -245,8 +245,10 @@ def run_training(
             model, sources, target, src_caches, tgt_cache,
             optimizer, cfg, epoch,
         )
-        tgt_stats = evaluate(model, target, tgt_cache, cfg)
+        # Full-target evaluation runs FGW over every node, so only do it on
+        # the epochs we report (and the last one) instead of every epoch.
         if epoch == 1 or epoch % 5 == 0 or epoch == cfg.epochs:
+            tgt_stats = evaluate(model, target, tgt_cache, cfg)
             print(
                 f"Epoch {epoch:3d} [{stats['phase']:>6}] "
                 f"loss {stats['loss']:.4f}  "
@@ -260,9 +262,11 @@ def run_training(
                 f"src_f1 {stats['src_f1_mean']:.4f}  "
                 f"tgt_f1 {tgt_stats['f1']:.4f}  tgt_auc {tgt_stats['auc']:.4f}"
             )
-        if tgt_stats["f1"] > best_f1:
-            best_f1 = tgt_stats["f1"]
-            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            if tgt_stats["f1"] > best_f1:
+                best_f1 = tgt_stats["f1"]
+                best_state = {
+                    k: v.cpu().clone() for k, v in model.state_dict().items()
+                }
 
     if best_state is not None:
         model.load_state_dict(best_state)

@@ -33,7 +33,7 @@ def parse_args() -> FGWConfig:
     parser.add_argument("--proto_size", type=int, default=32)
     parser.add_argument("--num_protos", type=int, default=3)
     parser.add_argument("--fgw_alpha", type=float, default=0.5)
-    parser.add_argument("--fgw_epsilon", type=float, default=None)
+    parser.add_argument("--fgw_epsilon", type=float, default=0.05)
     parser.add_argument("--tau", type=float, default=0.5)
     parser.add_argument("--lambda_align", type=float, default=1.0)
     parser.add_argument("--lambda_ent", type=float, default=0.5)
