@@ -20,6 +20,12 @@ class FGWConfig:
     # --------------------------------------------------------------- encoder
     proj_dim: int = 64
     hidden_dim: int = 32          # = d, the FGW embedding dimension
+    use_layernorm: bool = True    # LayerNorm encoder output (scale-match FGW)
+
+    # ------------------------------------------------- parametric classifier
+    head_hidden: int = 32         # hidden width of the MLP prediction head
+    head_dropout: float = 0.5
+    no_da: bool = False           # diagnostic: encoder+head on sources only
 
     # -------------------------------------------------------------- ego graph
     ego_size: int = 32            # k = center + (k-1) PPR neighbours
@@ -33,9 +39,11 @@ class FGWConfig:
     num_protos: int = 3           # M prototype graphs per class
     proto_size: int = 32          # n_p nodes per prototype
     adjacency_temp: float = 1.0   # temperature on the soft-adjacency sigmoid
+    embed_init_scale: float = 1.0  # std of prototype embedding init
 
     # ------------------------------------------------------------ FGW solver
-    fgw_alpha: float = 0.5        # trade-off between feature and structure
+    fgw_alpha: float = 0.25       # trade-off between feature and structure
+                                  # (low: structure ~uninformative on dense graphs)
     fgw_epsilon: Optional[float] = 0.05  # entropic Sinkhorn FGW regularisation
     fgw_max_iter: int = 50        # outer block-coordinate (FGW) iterations
 
@@ -43,14 +51,17 @@ class FGWConfig:
     tau: float = 0.5              # temperature
 
     # ----------------------------------------------------------- loss weights
+    lambda_proto: float = 0.3     # aux source CE through FGW (keeps protos
+                                  # class-meaningful so alignment has anchors)
     lambda_align: float = 1.0
     lambda_ent: float = 0.5
-    lambda_sep: float = 0.1
+    lambda_sep: float = 1.0
     lambda_pl: float = 0.1
     lambda_vrex: float = 1.0
     lambda_struct: float = 1e-3
     sep_margin: float = 1.0
-    pl_threshold: float = 0.9
+    sep_intra_margin: float = 0.5  # bounded within-class diversity target
+    pl_threshold: float = 0.8
     target_class_prior: Optional[Tuple[float, float]] = None
 
     # ---------------------------------------------------- training schedule

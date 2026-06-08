@@ -92,8 +92,12 @@ def pairwise_fgw_distances(
     p_marg = h_e.unsqueeze(1).expand(B, C_cls * M, k).reshape(P, k)
     q_marg = q.view(1, n_p).expand(P, n_p)
 
-    # feature cost M_ij = ||F_e[i] - F_p[j]||^2
-    Mf = torch.cdist(Fe_b, Fp_b) ** 2                  # (P, k, n_p)
+    # feature cost M_ij = ||F_e[i] - F_p[j]||^2 / D
+    # The /D makes it the *per-dimension* mean squared difference, which is
+    # O(1) like the [0,1] structure term. Without it the feature half scales
+    # with the embedding dimension (~D) and dominates the FGW cost regardless
+    # of `alpha`, blowing up the distances (and the alignment loss with them).
+    Mf = torch.cdist(Fe_b, Fp_b) ** 2 / D              # (P, k, n_p)
 
     # square-loss GW constants (Peyre 2016): h1(a)=a, h2(b)=2b, f(x)=x^2
     a = torch.bmm(C1 ** 2, p_marg.unsqueeze(-1)).squeeze(-1)   # (P, k)

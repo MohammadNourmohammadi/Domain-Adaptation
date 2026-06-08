@@ -24,6 +24,7 @@ class PrototypeBank(nn.Module):
         embed_dim: int,
         anchor_weight: float,
         adjacency_temp: float,
+        embed_init_scale: float = 1.0,
     ):
         super().__init__()
         self.C = num_classes
@@ -33,7 +34,9 @@ class PrototypeBank(nn.Module):
         self.anchor_weight = anchor_weight
         self.temp = adjacency_temp
 
-        Z = torch.randn(num_classes, num_protos, proto_size, embed_dim) * 0.1
+        # Init at the encoder's (LayerNorm'd) embedding scale so the FGW
+        # feature cost isn't dominated by a constant magnitude offset.
+        Z = torch.randn(num_classes, num_protos, proto_size, embed_dim) * embed_init_scale
         self.Z = nn.Parameter(Z)
 
         E = torch.randn(num_classes, num_protos, proto_size, proto_size) * 0.1

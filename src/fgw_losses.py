@@ -71,8 +71,9 @@ def separation_loss(
     max_iter: int,
     margin: float,
     pairwise_fn: Callable,
+    intra_margin: float = 0.5,
 ) -> torch.Tensor:
-    """Push inter-class prototypes apart; decorrelate within a class.
+    """Push inter-class prototypes apart; keep within-class ones diverse.
 
     Reuses the same `pairwise_fgw_distances` machinery so the geometry
     of "prototype-vs-prototype" matches "ego-vs-prototype".
@@ -104,9 +105,11 @@ def separation_loss(
     inter = (dists * inter_mask).sum() / inter_sum
     intra = (dists * intra_mask).sum() / intra_sum
 
-    # Margin hinge on inter (push apart up to a margin), minus intra
-    # (encourage diversity within a class).
-    return F.relu(margin - inter) - intra
+    # Two bounded hinges: push inter-class prototypes apart up to `margin`,
+    # and penalise within-class prototypes only while they are *closer*
+    # than `intra_margin`. The old `- intra` term was unbounded below and
+    # perversely rewarded spreading within-class prototypes without limit.
+    return F.relu(margin - inter) + F.relu(intra_margin - intra)
 
 
 # --------------------------------------------------------------------- 5
