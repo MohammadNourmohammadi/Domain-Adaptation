@@ -22,8 +22,9 @@ from src.utils import set_seed
 
 def parse_args() -> FGWConfig:
     parser = argparse.ArgumentParser(description="FGW-prototype DA on Twitch")
-    parser.add_argument("--sources", type=str, nargs="+", default=["DE", "FR"])
-    parser.add_argument("--target", type=str, default="ENGB")
+    parser.add_argument("--sources", type=str, nargs="+",
+                        default=["DE", "ENGB", "ES", "FR", "PTBR"])
+    parser.add_argument("--target", type=str, default="RU")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=5e-3)
@@ -181,11 +182,11 @@ def main():
     print("=" * 60)
     for name, g in zip(cfg.source_domains, sources):
         s = evaluate(model, g)
-        print(f"  Source {name:>5}: acc {s['acc']:.4f}  "
-              f"f1 {s['f1']:.4f}  auc {s['auc']:.4f}")
+        print(f"  Source {name:>5}: ACC {s['acc']:.4f}  "
+              f"AUROC {s['auc']:.4f}  MacroF {s['f1']:.4f}")
     tgt_stats = evaluate(model, target)
-    print(f"  Target {cfg.target_domain:>5}: acc {tgt_stats['acc']:.4f}  "
-          f"f1 {tgt_stats['f1']:.4f}  auc {tgt_stats['auc']:.4f}")
+    print(f"  Target {cfg.target_domain:>5}: ACC {tgt_stats['acc']:.4f}  "
+          f"AUROC {tgt_stats['auc']:.4f}  MacroF {tgt_stats['f1']:.4f}")
     print("=" * 60)
 
 
