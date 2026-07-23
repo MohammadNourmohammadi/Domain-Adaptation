@@ -29,18 +29,28 @@ def grl_lambda_schedule(epoch: int, warmup_epochs: int) -> float:
 
 @torch.no_grad()
 def compute_metrics(logits: torch.Tensor, labels: torch.Tensor) -> dict:
+    prob = torch.softmax(logits, dim=1).cpu().numpy()
     preds = logits.argmax(dim=1).cpu().numpy()
     y_true = labels.cpu().numpy()
-    probs = torch.softmax(logits, dim=1)[:, 1].cpu().numpy()
+    num_classes = logits.size(1)
 
     metrics = {
         "acc": accuracy_score(y_true, preds),
         "f1": f1_score(y_true, preds, average="macro", zero_division=0),
     }
-    if len(np.unique(y_true)) > 1:
-        metrics["auc"] = roc_auc_score(y_true, probs)
-    else:
+    # AUROC needs >=2 classes present in y_true; multi-class uses macro OVR.
+    if len(np.unique(y_true)) < 2:
         metrics["auc"] = float("nan")
+    elif num_classes == 2:
+        metrics["auc"] = roc_auc_score(y_true, prob[:, 1])
+    else:
+        try:
+            metrics["auc"] = roc_auc_score(
+                y_true, prob, multi_class="ovr", average="macro",
+                labels=list(range(num_classes)),
+            )
+        except ValueError:
+            metrics["auc"] = float("nan")
     return metrics
 
 
