@@ -86,12 +86,43 @@ def _proto_tensors(model: FGWPrototypeDA, device):
     return Fp, Cp, q
 
 
+# --------------------------------------------------------- supervision budget
+def _labeled_indices(g: Data, ratio: float, stratified: bool) -> torch.Tensor:
+    """Node indices whose labels are revealed to the supervised source loss.
+
+    Implements the "X% of nodes labeled" supervision budget: only the returned
+    ``ratio`` fraction of source nodes ever contribute to the CE loss — the other
+    ``1 - ratio`` still flow through message passing but their labels are hidden.
+    The subset is drawn once (a random split, re-drawn when the global seed
+    changes), so V̄ᵢ is fixed across epochs as the paper's setting requires.
+
+    With ``stratified`` the draw is per-class (each class contributes ~``ratio``
+    of its nodes, min 1) — safer for imbalanced label sets; otherwise it is a
+    pure random draw over all nodes. ``ratio >= 1`` returns every node.
+    """
+    num_nodes = g.num_nodes
+    device = g.y.device
+    if ratio >= 1.0:
+        return torch.arange(num_nodes, device=device)
+    if stratified:
+        parts = []
+        for c in torch.unique(g.y):
+            cls_idx = (g.y == c).nonzero(as_tuple=False).view(-1)
+            k = max(1, int(round(ratio * cls_idx.numel())))
+            perm = torch.randperm(cls_idx.numel(), device=device)[:k]
+            parts.append(cls_idx[perm])
+        return torch.cat(parts)
+    k = max(1, int(round(ratio * num_nodes)))
+    return torch.randperm(num_nodes, device=device)[:k]
+
+
 # ----------------------------------------------------------------- train step
 def train_step(
     model: FGWPrototypeDA,
     sources: List[Data],
     target: Data,
     src_caches: List[EgoGraphCache],
+    src_labeled: List[torch.Tensor],
     tgt_cache: EgoGraphCache,
     optimizer: torch.optim.Optimizer,
     cfg: FGWConfig,
@@ -119,9 +150,11 @@ def train_step(
     per_src_losses = []          # head CE per source (drives L_cls and V-REx)
     per_src_proto = []           # FGW-prototype CE per source (anchoring)
     per_src_metrics = []
-    for s, emb, cache in zip(sources, src_emb, src_caches):
-        n = min(cfg.nodes_per_step, s.num_nodes)
-        seeds = torch.randperm(s.num_nodes, device=device)[:n]
+    for s, emb, cache, labeled in zip(sources, src_emb, src_caches, src_labeled):
+        # Only the labeled subset (the supervision budget) may seed the CE loss;
+        # the other source nodes are hidden from supervision.
+        n = min(cfg.nodes_per_step, labeled.numel())
+        seeds = labeled[torch.randperm(labeled.numel(), device=device)[:n]]
         y = s.y[seeds]
         head_logits = model.classify(emb[seeds])
         per_src_losses.append(cls_loss(head_logits, y))
@@ -247,6 +280,21 @@ def run_training(
     target = target.to(device)
     model = model.to(device)
 
+    # Supervision budget: fix a labeled subset per source graph for the whole run
+    # (the target is never labeled during training). Uses the already-seeded
+    # global RNG, so the split is deterministic per seed and re-drawn each run.
+    ratio = getattr(cfg, "source_label_ratio", 1.0)
+    stratified = getattr(cfg, "source_label_stratified", False)
+    src_labeled = [_labeled_indices(s, ratio, stratified) for s in sources]
+    if ratio < 1.0:
+        labeled_desc = ", ".join(
+            f"{name} {lab.numel()}/{s.num_nodes}"
+            for name, s, lab in zip(cfg.source_domains, sources, src_labeled)
+        )
+        draw = "stratified" if stratified else "random"
+        print(f"Supervision budget: {ratio:.0%} source labels ({draw} draw) -> "
+              f"labeled nodes [{labeled_desc}]")
+
     if cfg.no_da:
         # Pure source-supervised baseline: the head never touches the FGW
         # machinery, so there is no need to precompute any ego-graphs.
@@ -265,7 +313,7 @@ def run_training(
     best_state = None
     for epoch in range(1, cfg.epochs + 1):
         stats = train_step(
-            model, sources, target, src_caches, tgt_cache,
+            model, sources, target, src_caches, src_labeled, tgt_cache,
             optimizer, cfg, epoch,
         )
         if epoch == 1 or epoch % 5 == 0 or epoch == cfg.epochs:

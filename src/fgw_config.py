@@ -17,6 +17,16 @@ class FGWConfig:
     target_domain: str = "ENGB"
     feature_dim: int = 3170
 
+    # Supervision budget: the fraction of *source* nodes whose labels are revealed
+    # to the supervised CE loss. The remaining nodes stay in the graph — their
+    # features and edges still flow through message passing — but their labels are
+    # never shown to the loss; the target is always 0% labeled. 1.0 = every source
+    # label (the Twitch/Citation default). The Yelp pipeline overrides this to 0.1
+    # to match the SelMAG "10% labeled" protocol. The labeled subset is a random
+    # split drawn once per run (re-drawn when the seed changes).
+    source_label_ratio: float = 1.0
+    source_label_stratified: bool = False  # per-class draw vs. a pure random draw
+
     # --------------------------------------------------------------- encoder
     proj_dim: int = 64
     hidden_dim: int = 32          # = d, the FGW embedding dimension

@@ -208,3 +208,8 @@ __marimo__/
 
 # Large citation datasets (downloaded/cached, not versioned)
 data/citation/
+
+# Large Yelp dump, GLOVE vectors, and cached city graphs (not versioned)
+data/yelp/raw/
+data/yelp/glove/
+data/yelp/*/processed_fgw.pt
