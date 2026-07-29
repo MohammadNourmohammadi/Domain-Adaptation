@@ -52,8 +52,6 @@ def parse_args() -> FGWConfig:
     parser.add_argument("--fgw_epsilon", type=float, default=0.05)
     parser.add_argument("--tau", type=float, default=0.5)
     parser.add_argument("--lambda_proto", type=float, default=0.3)
-    parser.add_argument("--lambda_align", type=float, default=1.0)
-    parser.add_argument("--lambda_ent", type=float, default=0.5)
     parser.add_argument("--lambda_sep", type=float, default=1.0)
     parser.add_argument("--lambda_pl", type=float, default=0.1)
     parser.add_argument("--lambda_vrex", type=float, default=1.0)
@@ -64,9 +62,7 @@ def parse_args() -> FGWConfig:
                         metavar=("P0", "P1"),
                         help="known target class prior, e.g. --target_prior 0.454 0.546")
     parser.add_argument("--nodes_per_step", type=int, default=128)
-    parser.add_argument("--warmup_frac", type=float, default=0.2)
-    parser.add_argument("--refine_frac", type=float, default=0.6)
-    parser.add_argument("--ramp_epochs", type=int, default=20)
+    parser.add_argument("--warmup_frac", type=float, default=0.8)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -106,8 +102,6 @@ def parse_args() -> FGWConfig:
         fgw_epsilon=args.fgw_epsilon,
         tau=args.tau,
         lambda_proto=args.lambda_proto,
-        lambda_align=args.lambda_align,
-        lambda_ent=args.lambda_ent,
         lambda_sep=args.lambda_sep,
         lambda_pl=args.lambda_pl,
         lambda_vrex=args.lambda_vrex,
@@ -117,8 +111,6 @@ def parse_args() -> FGWConfig:
         target_class_prior=target_prior,
         nodes_per_step=args.nodes_per_step,
         warmup_frac=args.warmup_frac,
-        refine_frac=args.refine_frac,
-        ramp_epochs=args.ramp_epochs,
         seed=args.seed,
         device=device,
     )
@@ -145,8 +137,6 @@ def main():
     print(f"  head/LN       : {cfg.head_hidden} / {cfg.use_layernorm}")
     print(f"  mode          : {'source-only (no DA)' if cfg.no_da else 'FGW domain adaptation'}")
     print(f"  lambda_proto  : {cfg.lambda_proto}")
-    print(f"  lambda_align  : {cfg.lambda_align}")
-    print(f"  lambda_ent    : {cfg.lambda_ent}")
     print(f"  lambda_sep    : {cfg.lambda_sep}")
     print(f"  lambda_pl     : {cfg.lambda_pl}")
     print(f"  lambda_vrex   : {cfg.lambda_vrex}")

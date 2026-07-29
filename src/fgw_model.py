@@ -6,11 +6,9 @@ This module bundles three pieces that share an optimizer and a
   * the shared GCN encoder f_theta;
   * a parametric `ClassifierHead` g_psi that maps a node embedding to
     class logits — this is what produces predictions and is trained with
-    the supervised source cross-entropy. Decoupling prediction from the
-    FGW distances is what stops the alignment objective from being able
-    to trivially flatten the classifier (the ln-2 collapse);
-  * the learnable `PrototypeBank`, now used for *transfer* only: FGW
-    distances to the prototypes drive the target-alignment loss and an
+    the supervised source cross-entropy (plus pseudo-labels on the target
+    during the refine phase);
+  * the learnable `PrototypeBank`: FGW distances to the prototypes feed an
     auxiliary source term that keeps the prototypes class-meaningful.
 
 The ego-graph caches (one per data graph) live outside the module

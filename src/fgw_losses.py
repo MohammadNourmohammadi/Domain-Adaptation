@@ -7,12 +7,14 @@ trivial to ablate any single term.
 
 Symbols follow the method note:
     L_cls      supervised cross-entropy on the sources
-    L_align    target alignment to prototype manifolds (DEC-style)
-    L_ent      information maximisation on the target
     L_sep      inter-class prototype margin + intra-class decorrelation
     L_pl       confidence-thresholded pseudo-label cross-entropy
     L_vrex     variance of per-source risks
     L_struct   L1 penalty on prototype soft adjacencies
+
+The target-alignment (L_align) and information-maximisation (L_ent) terms
+have been removed: the only target signal left is the confidence-thresholded
+pseudo-label CE used in the refine phase.
 """
 
 from typing import Callable, Optional
@@ -30,35 +32,6 @@ def cls_loss(logits: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 
 
 # --------------------------------------------------------------------- 2
-def align_loss(d_bc: torch.Tensor, p_bc: torch.Tensor) -> torch.Tensor:
-    """L_align = mean_v sum_c q(c|v) * d_c(v) with a sharpened, detached q.
-
-    DEC-style soft assignment: q_ic ∝ p_ic^2 / sum_i p_ic, then row-norm.
-    The square sharpens the assignment and the per-class division
-    self-balances classes, which guards against the trivial collapse.
-    """
-    with torch.no_grad():
-        f_c = p_bc.sum(dim=0).clamp_min(_EPS)
-        q = (p_bc ** 2) / f_c
-        q = q / q.sum(dim=1, keepdim=True).clamp_min(_EPS)
-    return (q * d_bc).sum(dim=1).mean()
-
-
-# --------------------------------------------------------------------- 3
-def im_loss(p_bc: torch.Tensor) -> torch.Tensor:
-    """Conditional-entropy minimisation: sharpen each node's prediction.
-
-    L_ent = mean_v H(p(.|v))
-
-    Only the individual (per-node) entropy term is used: minimising it makes
-    every target prediction confident. The marginal / class-balance term has
-    been removed, so this loss imposes no constraint on the overall predicted
-    class mix.
-    """
-    return -(p_bc * (p_bc + _EPS).log()).sum(dim=1).mean()
-
-
-# --------------------------------------------------------------------- 4
 def separation_loss(
     proto_F: torch.Tensor,        # (C, M, n_p, d+1)
     proto_C: torch.Tensor,        # (C, M, n_p, n_p)
@@ -109,7 +82,7 @@ def separation_loss(
     return F.relu(margin - inter) + F.relu(intra_margin - intra)
 
 
-# --------------------------------------------------------------------- 5
+# --------------------------------------------------------------------- 3
 def pseudo_label_loss(
     logits: torch.Tensor, p_bc: torch.Tensor, threshold: float,
 ) -> torch.Tensor:
@@ -120,11 +93,11 @@ def pseudo_label_loss(
     return F.cross_entropy(logits[mask], pred[mask])
 
 
-# --------------------------------------------------------------------- 6
+# --------------------------------------------------------------------- 4
 def vrex_loss(per_source_losses: torch.Tensor) -> torch.Tensor:
     return per_source_losses.var(unbiased=False)
 
 
-# --------------------------------------------------------------------- 7
+# --------------------------------------------------------------------- 5
 def struct_l1_loss(A: torch.Tensor) -> torch.Tensor:
     return A.abs().mean()
