@@ -38,19 +38,27 @@ def compute_metrics(logits: torch.Tensor, labels: torch.Tensor) -> dict:
         "acc": accuracy_score(y_true, preds),
         "f1": f1_score(y_true, preds, average="macro", zero_division=0),
     }
-    # AUROC needs >=2 classes present in y_true; multi-class uses macro OVR.
-    if len(np.unique(y_true)) < 2:
+    # AUROC needs >=2 classes present in y_true.
+    present = np.unique(y_true)
+    if present.size < 2:
         metrics["auc"] = float("nan")
     elif num_classes == 2:
         metrics["auc"] = roc_auc_score(y_true, prob[:, 1])
     else:
-        try:
-            metrics["auc"] = roc_auc_score(
-                y_true, prob, multi_class="ovr", average="macro",
-                labels=list(range(num_classes)),
-            )
-        except ValueError:
-            metrics["auc"] = float("nan")
+        # One-vs-rest macro AUROC over only the classes present in y_true.
+        # sklearn's multi_class="ovr" with labels=range(num_classes) scores
+        # every class, so a class absent from the batch gives an all-negative
+        # OVR column -> "Only one class present" UndefinedMetricWarning (mini-
+        # batches during training routinely miss classes). Restricting to
+        # present classes is warning-free and equals sklearn's macro-OVR when
+        # all classes are present (e.g. full-graph evaluation), so reported
+        # numbers are unchanged; each present column has both labels because
+        # >=2 classes are present.
+        aucs = [
+            roc_auc_score((y_true == c).astype(int), prob[:, c])
+            for c in present
+        ]
+        metrics["auc"] = float(np.mean(aucs))
     return metrics
 
 

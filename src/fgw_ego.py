@@ -48,6 +48,9 @@ class EgoGraphCache:
 
         self._nbrs_dev: torch.Tensor = None
         self._struct_dev: torch.Tensor = None
+        # Maps a full-graph node id -> its row in the compact cached tensors.
+        # None means "every node was precomputed" (rows are node ids directly).
+        self._row_of: torch.Tensor = None
 
     # ------------------------------------------------------------ internals
     def _sparse_P(self, device) -> torch.Tensor:
@@ -83,8 +86,24 @@ class EgoGraphCache:
         return d.astype(np.float32)
 
     # ------------------------------------------------------------- precompute
-    def precompute_all(self, batch_size: int = 512, device: str = "cpu") -> None:
-        """Fill the neighbour list and structure tensor for every node.
+    def precompute_all(
+        self,
+        batch_size: int = 512,
+        device: str = "cpu",
+        seed_nodes: torch.Tensor = None,
+    ) -> None:
+        """Fill the neighbour list and structure tensor for the seed nodes.
+
+        `seed_nodes=None` precomputes every node — required for the target,
+        whose alignment/IM samples seeds from the whole graph. Passing an
+        explicit index tensor restricts the expensive work (PPR power-iteration
+        + the per-node scipy shortest-path solve) to just those seeds. Source
+        graphs use this: only the labeled supervision subset is ever seeded into
+        an FGW problem, so the other nodes' ego-graphs would never be read.
+
+        When a subset is given the cached tensors are stored *compactly* (one
+        row per seed, not per node) and `self._row_of` maps a node id to its
+        compact row so `build_ego_batch_from_cache` can still index by node id.
 
         PPR runs on CPU regardless of `device`: sparse COO tensors are
         unsupported on MPS, and the result is purely structural so it
@@ -92,14 +111,22 @@ class EgoGraphCache:
         moved to `device` so the per-step batch builder can index them
         without a host transfer.
         """
-        N = self.num_nodes
         k = self.k
-        all_nbrs = torch.empty(N, k, dtype=torch.long)
-        all_C = torch.empty(N, k, k, dtype=torch.float32)
+        if seed_nodes is None:
+            seeds_all = torch.arange(self.num_nodes)  # CPU; rows == node ids
+            self._row_of = None
+        else:
+            seeds_all = seed_nodes.detach().to("cpu").long().view(-1)
+            row_of = torch.full((self.num_nodes,), -1, dtype=torch.long)
+            row_of[seeds_all] = torch.arange(seeds_all.numel())
+            self._row_of = row_of.to(device)
 
-        seeds_all = torch.arange(N)  # CPU
-        for start in range(0, N, batch_size):
-            end = min(start + batch_size, N)
+        S = seeds_all.numel()
+        all_nbrs = torch.empty(S, k, dtype=torch.long)
+        all_C = torch.empty(S, k, k, dtype=torch.float32)
+
+        for start in range(0, S, batch_size):
+            end = min(start + batch_size, S)
             seeds = seeds_all[start:end]
             nbrs = self._topk_neighbours(seeds).detach()
             all_nbrs[start:end] = nbrs
@@ -128,8 +155,11 @@ def build_ego_batch_from_cache(
     """
     device = embeddings.device
     k = cache.k
-    nbrs = cache._nbrs_dev[seeds]            # (B, k)
-    C_ = cache._struct_dev[seeds]            # (B, k, k)
+    # When only a subset was precomputed, map node ids -> compact cache rows.
+    # (`_row_of is None` => every node cached, so the id *is* the row.)
+    rows = seeds if cache._row_of is None else cache._row_of[seeds]
+    nbrs = cache._nbrs_dev[rows]             # (B, k)
+    C_ = cache._struct_dev[rows]             # (B, k, k)
     B = seeds.numel()
 
     F_emb = embeddings[nbrs]                 # (B, k, d)

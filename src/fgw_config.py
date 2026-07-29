@@ -21,9 +21,12 @@ class FGWConfig:
     # to the supervised CE loss. The remaining nodes stay in the graph — their
     # features and edges still flow through message passing — but their labels are
     # never shown to the loss; the target is always 0% labeled. 1.0 = every source
-    # label (the Twitch/Citation default). The Yelp pipeline overrides this to 0.1
-    # to match the SelMAG "10% labeled" protocol. The labeled subset is a random
-    # split drawn once per run (re-drawn when the seed changes).
+    # label. All three runners (Twitch/Citation/Yelp) override this to 0.1 by
+    # default to match the SelMAG "10% labeled" protocol; pass --source_label_ratio
+    # 1.0 for full supervision. Restricting to 10% also lets source ego-graphs be
+    # precomputed for just the labeled subset (see fgw_train._make_cache). The
+    # labeled subset is a random split drawn once per run (re-drawn when the seed
+    # changes). This dataclass default stays 1.0 as the neutral library fallback.
     source_label_ratio: float = 1.0
     source_label_stratified: bool = False  # per-class draw vs. a pure random draw
 

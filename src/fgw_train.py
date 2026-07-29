@@ -67,7 +67,9 @@ def _phase(epoch: int, total: int, warmup_frac: float, refine_frac: float) -> st
 
 
 # ---------------------------------------------------------------------- caches
-def _make_cache(g: Data, cfg: FGWConfig, device: str) -> EgoGraphCache:
+def _make_cache(
+    g: Data, cfg: FGWConfig, device: str, seed_nodes: torch.Tensor = None,
+) -> EgoGraphCache:
     cache = EgoGraphCache(
         edge_index=g.edge_index,
         num_nodes=g.num_nodes,
@@ -75,7 +77,11 @@ def _make_cache(g: Data, cfg: FGWConfig, device: str) -> EgoGraphCache:
         ppr_iters=cfg.ppr_iters,
         ego_size=cfg.ego_size,
     )
-    cache.precompute_all(batch_size=512, device=device)
+    # `seed_nodes=None` precomputes every node (the target). Source graphs pass
+    # their labeled subset: those are the only nodes ever seeded into an FGW
+    # problem, so precomputing the rest would waste the (expensive) PPR +
+    # shortest-path work on ego-graphs that are never read.
+    cache.precompute_all(batch_size=512, device=device, seed_nodes=seed_nodes)
     return cache
 
 
@@ -301,8 +307,23 @@ def run_training(
         src_caches = [None for _ in sources]
         tgt_cache = None
     else:
-        print("Precomputing PPR ego-graphs ...")
-        src_caches = [_make_cache(s, cfg, device) for s in sources]
+        # Sources: only the labeled subset is ever seeded (see train_step), so
+        # restrict the precompute to those nodes. Target: every node may be
+        # sampled for alignment/IM, so precompute all of them. When a source is
+        # fully labeled (ratio >= 1) fall back to the all-nodes path to skip
+        # building an identity row map.
+        n_src_seeds = sum(lab.numel() for lab in src_labeled)
+        print(
+            f"Precomputing PPR ego-graphs (sources: {n_src_seeds} labeled seeds, "
+            f"target: {target.num_nodes} nodes) ..."
+        )
+        src_caches = [
+            _make_cache(
+                s, cfg, device,
+                seed_nodes=None if lab.numel() >= s.num_nodes else lab,
+            )
+            for s, lab in zip(sources, src_labeled)
+        ]
         tgt_cache = _make_cache(target, cfg, device)
 
     optimizer = torch.optim.Adam(

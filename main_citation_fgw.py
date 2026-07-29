@@ -39,6 +39,14 @@ def parse_args() -> FGWConfig:
     parser.add_argument("--target", type=str, default="DBLPv7",
                         choices=CITATION_DOMAINS)
     parser.add_argument("--data_root", type=str, default="data/citation")
+    parser.add_argument("--source_label_ratio", type=float, default=0.1,
+                        help="fraction of source nodes whose labels are revealed "
+                             "to the supervised loss (supervision budget); the "
+                             "rest stay in the graph but their labels are hidden. "
+                             "Default 0.1 (10%% labeled); use 1.0 for all labels")
+    parser.add_argument("--source_label_stratified", action="store_true",
+                        help="draw the labeled subset per-class (stratified) "
+                             "instead of a pure random draw over all nodes")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=5e-3)
@@ -103,6 +111,8 @@ def parse_args() -> FGWConfig:
         target_domain=args.target,
         feature_dim=CITATION_FEATURE_DIM,
         num_classes=CITATION_NUM_CLASSES,
+        source_label_ratio=args.source_label_ratio,
+        source_label_stratified=args.source_label_stratified,
         epochs=args.epochs,
         lr=args.lr,
         weight_decay=args.weight_decay,
@@ -153,6 +163,9 @@ def main():
     print("=" * 60)
     print(f"  Sources       : {cfg.source_domains}")
     print(f"  Target        : {cfg.target_domain}")
+    _draw = "stratified" if cfg.source_label_stratified else "random"
+    print(f"  Source labels : {cfg.source_label_ratio:.0%} ({_draw} draw; "
+          f"target 0%)")
     print(f"  Device        : {cfg.device}")
     print(f"  feature_dim   : {cfg.feature_dim}")
     print(f"  num_classes   : {cfg.num_classes}")
