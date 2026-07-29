@@ -130,11 +130,11 @@ def main():
     print("=" * 60)
     for name, g in zip(config.source_domains, sources):
         s = evaluate(model, g)
-        print(f"  Source {name:>5}: acc {s['acc']:.4f}  "
-              f"f1 {s['f1']:.4f}  auc {s['auc']:.4f}")
+        print(f"  Source {name:>5}: ACC {s['acc']:.4f}  "
+              f"AUROC {s['auc']:.4f}  MacroF {s['f1']:.4f}")
     tgt_stats = evaluate(model, target)
-    print(f"  Target {config.target_domain:>5}: acc {tgt_stats['acc']:.4f}  "
-          f"f1 {tgt_stats['f1']:.4f}  auc {tgt_stats['auc']:.4f}")
+    print(f"  Target {config.target_domain:>5}: ACC {tgt_stats['acc']:.4f}  "
+          f"AUROC {tgt_stats['auc']:.4f}  MacroF {tgt_stats['f1']:.4f}")
     print(f"  Mean causal edge weight (target): "
           f"{tgt_stats['avg_edge_weight']:.4f}")
     print("=" * 60)

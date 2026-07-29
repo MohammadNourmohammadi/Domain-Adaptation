@@ -330,8 +330,9 @@ def run_training(
         model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay,
     )
 
-    best_f1 = -1.0
-    best_state = None
+    # Report the *last* epoch's model (no best-checkpoint restore): the "Final
+    # results" then match the final log line rather than an early peak-target-F1
+    # snapshot.
     for epoch in range(1, cfg.epochs + 1):
         stats = train_step(
             model, sources, target, src_caches, src_labeled, tgt_cache,
@@ -349,16 +350,10 @@ def run_training(
                 f"sep {stats['L_sep']:.4f}  "
                 f"vx {stats['L_vrex']:.4f}  "
                 f"pl {stats['L_pl']:.4f} | "
-                f"src_f1 {stats['src_f1_mean']:.4f}  "
-                f"tgt_f1 {tgt_stats['f1']:.4f}  tgt_auc {tgt_stats['auc']:.4f}"
+                f"src_f1 {stats['src_f1_mean']:.4f} | "
+                f"tgt ACC {tgt_stats['acc']:.4f}  "
+                f"AUROC {tgt_stats['auc']:.4f}  "
+                f"MacroF {tgt_stats['f1']:.4f}"
             )
-            if tgt_stats["f1"] > best_f1:
-                best_f1 = tgt_stats["f1"]
-                best_state = {
-                    k: v.cpu().clone() for k, v in model.state_dict().items()
-                }
 
-    if best_state is not None:
-        model.load_state_dict(best_state)
-        model = model.to(device)
     return model
