@@ -45,20 +45,17 @@ def align_loss(d_bc: torch.Tensor, p_bc: torch.Tensor) -> torch.Tensor:
 
 
 # --------------------------------------------------------------------- 3
-def im_loss(p_bc: torch.Tensor, prior: Optional[torch.Tensor] = None) -> torch.Tensor:
-    """Information maximisation: sharpen individual preds, diversify mean.
+def im_loss(p_bc: torch.Tensor) -> torch.Tensor:
+    """Conditional-entropy minimisation: sharpen each node's prediction.
 
-    L_ent = mean_v H(p(.|v)) - H(mean_v p(.|v))
-    If `prior` is given it replaces the uniform implicit prior in the
-    second term, useful under heavy class imbalance.
+    L_ent = mean_v H(p(.|v))
+
+    Only the individual (per-node) entropy term is used: minimising it makes
+    every target prediction confident. The marginal / class-balance term has
+    been removed, so this loss imposes no constraint on the overall predicted
+    class mix.
     """
-    ent_individual = -(p_bc * (p_bc + _EPS).log()).sum(dim=1).mean()
-    p_mean = p_bc.mean(dim=0)
-    if prior is None:
-        ent_mean = -(p_mean * (p_mean + _EPS).log()).sum()
-    else:
-        ent_mean = -(p_mean * (prior + _EPS).log()).sum()
-    return ent_individual - ent_mean
+    return -(p_bc * (p_bc + _EPS).log()).sum(dim=1).mean()
 
 
 # --------------------------------------------------------------------- 4

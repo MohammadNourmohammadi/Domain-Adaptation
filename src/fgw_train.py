@@ -203,12 +203,8 @@ def train_step(
         head_logits_t = model.classify(tgt_emb[seeds_t])
         p_t = Fnn.softmax(head_logits_t, dim=1)
 
-        prior = (
-            torch.tensor(cfg.target_class_prior, device=device, dtype=p_t.dtype)
-            if cfg.target_class_prior is not None else None
-        )
         if ent_w > 0:
-            L_ent = im_loss(p_t, prior)
+            L_ent = im_loss(p_t)
         if pl_w > 0:
             L_pl = pseudo_label_loss(head_logits_t, p_t.detach(), cfg.pl_threshold)
         if align_w > 0:
