@@ -80,10 +80,18 @@ class EgoGraphCache:
         return torch.cat([seeds.view(-1, 1), top_idx], dim=1)  # (B, k)
 
     def _structure_matrix(self, nbrs_1d: np.ndarray) -> np.ndarray:
+        # Normalise by the ego graph's *own* diameter, not by k. Dividing by k
+        # collapses near-clique neighbourhoods (avg degree >> 1) into a tiny
+        # {0, 1/k, 2/k} band with no spread, so C_ego (mean ~0.04) never lands
+        # on the same [0,1] scale as the prototype C_p (mean ~0.5) and the FGW
+        # structural term degenerates into a class-independent constant.
         sub = self._A_scipy[nbrs_1d, :][:, nbrs_1d]
         d = shortest_path(sub, directed=False, unweighted=True)
-        d = np.where(np.isinf(d), float(self.k), d)
-        return d.astype(np.float32)
+        finite = d[np.isfinite(d)]
+        diam = float(finite.max()) if finite.size else 1.0
+        fill = diam + 1.0                       # disconnected = one hop past diameter
+        d = np.where(np.isinf(d), fill, d) / max(fill, 1.0)
+        return d.astype(np.float32)             # spans [0, 1] with real spread
 
     # ------------------------------------------------------------- precompute
     def precompute_all(
@@ -132,8 +140,8 @@ class EgoGraphCache:
             all_nbrs[start:end] = nbrs
             nbrs_np = nbrs.numpy()
             for i in range(end - start):
-                d = self._structure_matrix(nbrs_np[i])
-                all_C[start + i] = torch.from_numpy(d) / float(self.k)  # to [0,1]
+                d = self._structure_matrix(nbrs_np[i])  # already normalised to [0,1]
+                all_C[start + i] = torch.from_numpy(d)
 
         self._nbrs_dev = all_nbrs.to(device)
         self._struct_dev = all_C.to(device)

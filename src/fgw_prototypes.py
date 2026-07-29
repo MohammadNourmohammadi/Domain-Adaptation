@@ -39,7 +39,11 @@ class PrototypeBank(nn.Module):
         Z = torch.randn(num_classes, num_protos, proto_size, embed_dim) * embed_init_scale
         self.Z = nn.Parameter(Z)
 
-        E = torch.randn(num_classes, num_protos, proto_size, proto_size) * 0.1
+        # Wide init so sigmoid(E/temp) spreads C_p across roughly [0.12, 0.88]
+        # rather than collapsing at ~0.5. This matches the range of the ego
+        # graph's diameter-normalised shortest-path distances, without which the
+        # FGW structural half is a class-independent constant offset.
+        E = torch.randn(num_classes, num_protos, proto_size, proto_size) * 2.0
         self.E_logits = nn.Parameter(E)
 
     def features(self) -> torch.Tensor:

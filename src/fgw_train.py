@@ -171,6 +171,15 @@ def train_step(
                 anchor_weight=cfg.anchor_weight,
                 anchor_mass_extra=cfg.anchor_mass_extra,
             )
+            if epoch == 0 and not per_src_proto:
+                # Scale sanity check: the two structure matrices must sit on a
+                # comparable scale or the FGW geometry is broken. Means should
+                # be within ~2x of each other.
+                print(
+                    f"[fgw-scale] C_ego mean={Ce.mean().item():.3f} "
+                    f"std={Ce.std().item():.3f} | "
+                    f"C_p mean={Cp.mean().item():.3f} std={Cp.std().item():.3f}"
+                )
             d_bcm = pairwise_fgw_distances(
                 Fe, Ce, he, Fp, Cp, q,
                 alpha=cfg.fgw_alpha, epsilon=cfg.fgw_epsilon,
