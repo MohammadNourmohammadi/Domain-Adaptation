@@ -26,6 +26,11 @@ for reading the achievable in-domain ceiling).
 Mini-batching is done over nodes, not graphs: every step encodes each
 full graph once (cheap) and then samples `cfg.nodes_per_step` seeds
 from each source / target to form FGW problems.
+
+Model selection uses a held-out slice of the source label budget
+(`cfg.source_val_frac`) — never target labels. The end-of-run table also
+reports what the label-free criteria (SND, prediction entropy) would have
+picked and how far each lands from the target-oracle epoch.
 """
 
 import math
@@ -122,6 +127,47 @@ def _labeled_indices(g: Data, ratio: float, stratified: bool) -> torch.Tensor:
     return torch.randperm(num_nodes, device=device)[:k]
 
 
+def _labeled_split(
+    g: Data, ratio: float, stratified: bool, val_frac: float,
+) -> tuple:
+    """Split the revealed-label budget into a train part and a *held-out* part.
+
+    The CE loss only ever sees the train part; the val part is scored but never
+    backpropped, which is what makes it a legitimate model-selection signal.
+    Without it the only source number available is macro-F1 on the exact seeds
+    just optimised, which measures memorisation rather than generalisation.
+
+    The draw mirrors ``_labeled_indices``: per-class when ``stratified`` (so the
+    val split keeps the class mix), a pure random split otherwise. At least one
+    node always stays in train, so tiny budgets degrade gracefully to an empty
+    val split rather than an empty train split.
+    """
+    idx = _labeled_indices(g, ratio, stratified)
+    empty = idx.new_empty((0,))
+    if val_frac <= 0.0 or idx.numel() < 2:
+        return idx, empty
+
+    def _cut(pool: torch.Tensor) -> tuple:
+        perm = pool[torch.randperm(pool.numel(), device=pool.device)]
+        n_val = min(max(1, int(round(val_frac * perm.numel()))), perm.numel() - 1)
+        return perm[n_val:], perm[:n_val]
+
+    if stratified:
+        train_parts, val_parts = [], []
+        y_idx = g.y[idx]
+        for c in torch.unique(y_idx):
+            cls_pool = idx[y_idx == c]
+            if cls_pool.numel() < 2:
+                train_parts.append(cls_pool)
+                continue
+            tr, va = _cut(cls_pool)
+            train_parts.append(tr)
+            val_parts.append(va)
+        val = torch.cat(val_parts) if val_parts else empty
+        return torch.cat(train_parts), val
+    return _cut(idx)
+
+
 # ----------------------------------------------------------------- train step
 def train_step(
     model: FGWPrototypeDA,
@@ -169,6 +215,9 @@ def train_step(
         y = s.y[seeds]
         head_logits = model.classify(emb[seeds])
         per_src_losses.append(cls_loss(head_logits, y))
+        # NOTE: a *training* metric — the same nodes this step backprops through.
+        # It says nothing about generalisation and will climb towards 1.0 while
+        # held-out performance falls; read `src_val_f1` in the log for that.
         per_src_metrics.append(compute_metrics(head_logits, y))
         if proto_w > 0:
             Fe, Ce, he = build_ego_batch_from_cache(
@@ -269,21 +318,85 @@ def train_step(
         "phase": phase,
         "align_w": align_w,
         "ent_w": ent_w,
-        "src_f1_mean": sum(m["f1"] for m in per_src_metrics) / len(per_src_metrics),
+        # Training-set macro-F1 (see the note where it is computed).
+        "src_train_f1": sum(m["f1"] for m in per_src_metrics) / len(per_src_metrics),
     }
 
 
 # --------------------------------------------------------------------- evaluate
 @torch.no_grad()
-def evaluate(model: FGWPrototypeDA, data: Data) -> dict:
+def evaluate(model: FGWPrototypeDA, data: Data, idx: torch.Tensor = None) -> dict:
     """Predictions come from the parametric head, so evaluation no longer
-    needs ego-graphs or FGW solves (one cheap encode + MLP pass)."""
+    needs ego-graphs or FGW solves (one cheap encode + MLP pass).
+
+    ``idx`` restricts scoring to a node subset (used for the held-out source
+    validation split); the encode still runs on the full graph, so the scored
+    nodes keep their real neighbourhoods.
+    """
     model.eval()
     emb = model.encode(data.x, data.edge_index)
     logits = model.classify(emb)
-    metrics = compute_metrics(logits, data.y)
-    metrics["loss"] = Fnn.cross_entropy(logits, data.y).item()
+    y = data.y
+    if idx is not None:
+        logits, y = logits[idx], y[idx]
+    metrics = compute_metrics(logits, y)
+    metrics["loss"] = Fnn.cross_entropy(logits, y).item()
     return metrics
+
+
+@torch.no_grad()
+def _source_val_metrics(
+    model: FGWPrototypeDA, sources: List[Data], src_val: List[torch.Tensor],
+) -> dict:
+    """Macro-F1 pooled over every source's held-out split.
+
+    Pooling the logits (rather than averaging per-source F1) keeps the metric
+    stable when one source contributes only a handful of validation nodes.
+    """
+    model.eval()
+    logits, labels = [], []
+    for s, val in zip(sources, src_val):
+        if val.numel() == 0:
+            continue
+        emb = model.encode(s.x, s.edge_index)
+        logits.append(model.classify(emb)[val])
+        labels.append(s.y[val])
+    if not logits:
+        return None
+    return compute_metrics(torch.cat(logits), torch.cat(labels))
+
+
+# --------------------------------------------------- unsupervised criteria
+@torch.no_grad()
+def _target_criteria(
+    model: FGWPrototypeDA, target: Data, sub: torch.Tensor, temp: float,
+) -> dict:
+    """Label-free selection scores on the target graph (higher = better).
+
+    ``neg_ent``  – negative mean prediction entropy: confident predictions.
+    ``snd``      – Soft Neighborhood Density (Saito et al., ICCV 2021): entropy
+                   of the temperature-softmaxed cosine-similarity distribution
+                   between L2-normalised target predictions. A representation
+                   whose target points sit in dense, consistent neighbourhoods
+                   scores high; one collapsed onto a few points scores low.
+
+    Neither sees a target label, so selecting on them is legitimate — unlike
+    selecting on target macro-F1, which is oracle selection.
+    """
+    model.eval()
+    emb = model.encode(target.x, target.edge_index)
+    p = Fnn.softmax(model.classify(emb), dim=1)
+
+    ent = -(p * torch.log(p.clamp_min(1e-8))).sum(dim=1).mean()
+
+    # O(N^2) similarity matrix -> score a fixed subsample so the number is both
+    # affordable and comparable across epochs.
+    z = Fnn.normalize(p[sub], dim=1)
+    sim = z @ z.t()
+    sim.fill_diagonal_(-float("inf"))          # a point is not its own neighbour
+    nb = Fnn.softmax(sim / temp, dim=1)
+    snd = -(nb * torch.log(nb.clamp_min(1e-8))).sum(dim=1).mean()
+    return {"neg_ent": -ent.item(), "snd": snd.item()}
 
 
 # ------------------------------------------------------------------ orchestrator
@@ -303,15 +416,22 @@ def run_training(
     # global RNG, so the split is deterministic per seed and re-drawn each run.
     ratio = getattr(cfg, "source_label_ratio", 1.0)
     stratified = getattr(cfg, "source_label_stratified", False)
-    src_labeled = [_labeled_indices(s, ratio, stratified) for s in sources]
-    if ratio < 1.0:
+    val_frac = getattr(cfg, "source_val_frac", 0.0)
+    # The budget is split train/val: only `src_labeled` reaches the CE loss, so
+    # `src_val` stays a clean generalisation signal for checkpoint selection.
+    splits = [_labeled_split(s, ratio, stratified, val_frac) for s in sources]
+    src_labeled = [tr for tr, _ in splits]
+    src_val = [va for _, va in splits]
+    n_val_total = sum(va.numel() for va in src_val)
+    if ratio < 1.0 or n_val_total:
         labeled_desc = ", ".join(
-            f"{name} {lab.numel()}/{s.num_nodes}"
-            for name, s, lab in zip(cfg.source_domains, sources, src_labeled)
+            f"{name} {tr.numel()}+{va.numel()}v/{s.num_nodes}"
+            for name, s, tr, va in zip(cfg.source_domains, sources, src_labeled, src_val)
         )
         draw = "stratified" if stratified else "random"
-        print(f"Supervision budget: {ratio:.0%} source labels ({draw} draw) -> "
-              f"labeled nodes [{labeled_desc}]")
+        print(f"Supervision budget: {ratio:.0%} source labels ({draw} draw, "
+              f"{val_frac:.0%} held out for selection) -> "
+              f"train+val nodes [{labeled_desc}]")
 
     if cfg.no_da:
         # Pure source-supervised baseline: the head never touches the FGW
@@ -342,9 +462,26 @@ def run_training(
         model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay,
     )
 
-    # Report the *last* epoch's model (no best-checkpoint restore): the "Final
-    # results" then match the final log line rather than an early peak-target-F1
-    # snapshot.
+    # Fixed target subsample for SND, so the score is comparable across epochs.
+    snd_sub = torch.randperm(target.num_nodes, device=device)[
+        : min(getattr(cfg, "snd_max_nodes", 2000), target.num_nodes)
+    ]
+    snd_temp = getattr(cfg, "snd_temp", 0.05)
+
+    criterion = getattr(cfg, "model_selection", "last")
+    if criterion == "src_val" and n_val_total == 0:
+        print("No source validation nodes available -> model_selection falls "
+              "back to 'last'.")
+        criterion = "last"
+    # Every candidate criterion is tracked at each eval epoch, not just the one
+    # doing the selecting: the end-of-run table then shows what each *would*
+    # have picked and what that costs against the oracle.
+    history = []
+
+    best_state = None
+    best_score = -float("inf")
+    best_epoch = None
+
     for epoch in range(1, cfg.epochs + 1):
         stats = train_step(
             model, sources, target, src_caches, src_labeled, tgt_cache,
@@ -352,6 +489,31 @@ def run_training(
         )
         if epoch == 1 or epoch % 5 == 0 or epoch == cfg.epochs:
             tgt_stats = evaluate(model, target)
+            val_stats = _source_val_metrics(model, sources, src_val)
+            unsup = _target_criteria(model, target, snd_sub, snd_temp)
+            record = {
+                "epoch": epoch,
+                "src_val": val_stats["f1"] if val_stats else float("nan"),
+                "snd": unsup["snd"],
+                "neg_ent": unsup["neg_ent"],
+                "tgt_f1": tgt_stats["f1"],
+                "tgt_auc": tgt_stats["auc"],
+            }
+            history.append(record)
+
+            if criterion in ("src_val", "snd", "neg_ent", "entropy"):
+                key = "neg_ent" if criterion == "entropy" else criterion
+                score = record[key]
+                if score == score and score > best_score:   # NaN-safe
+                    best_score, best_epoch = score, epoch
+                    best_state = {
+                        k: v.detach().clone() for k, v in model.state_dict().items()
+                    }
+
+            val_txt = (
+                f"src_val_f1 {record['src_val']:.4f}" if val_stats
+                else "src_val_f1   n/a "
+            )
             print(
                 f"Epoch {epoch:3d} [{stats['phase']:>7}] "
                 f"loss {stats['loss']:.4f}  "
@@ -362,10 +524,55 @@ def run_training(
                 f"sep {stats['L_sep']:.4f}  "
                 f"vx {stats['L_vrex']:.4f}  "
                 f"pl {stats['L_pl']:.4f} | "
-                f"src_f1 {stats['src_f1_mean']:.4f} | "
+                f"src_train_f1 {stats['src_train_f1']:.4f}  {val_txt} | "
+                f"snd {record['snd']:.4f}  "
                 f"tgt ACC {tgt_stats['acc']:.4f}  "
                 f"AUROC {tgt_stats['auc']:.4f}  "
                 f"MacroF {tgt_stats['f1']:.4f}"
             )
 
+    _report_selection(history, criterion, best_epoch)
+
+    if best_state is not None:
+        print(f"Restoring checkpoint from epoch {best_epoch} "
+              f"(selected by '{criterion}').")
+        model.load_state_dict(best_state)
     return model
+
+
+def _report_selection(history: List[dict], criterion: str, best_epoch) -> None:
+    """Print what each criterion picks and what it costs against the oracle.
+
+    The oracle row selects on target macro-F1 and is *not* a usable criterion —
+    it is the upper bound that says how much a label-free (or source-val)
+    criterion gives up. Reporting that gap honestly is the point.
+    """
+    if not history:
+        return
+    criterion = "neg_ent" if criterion == "entropy" else criterion
+    oracle = max(history, key=lambda r: r["tgt_f1"])
+    print("\n" + "-" * 60)
+    print("  Model selection (target labels never used to select)")
+    print("-" * 60)
+    print(f"  {'criterion':<12}{'epoch':>7}{'score':>10}{'tgt MacroF':>13}"
+          f"{'vs oracle':>11}")
+    for name, key in (("src_val_f1", "src_val"), ("SND", "snd"),
+                      ("neg_entropy", "neg_ent")):
+        usable = [r for r in history if r[key] == r[key]]
+        if not usable:
+            print(f"  {name:<12}{'n/a':>7}")
+            continue
+        pick = max(usable, key=lambda r: r[key])
+        mark = " *" if criterion == key else "  "
+        print(f"  {name:<12}{pick['epoch']:>7}{pick[key]:>10.4f}"
+              f"{pick['tgt_f1']:>13.4f}{pick['tgt_f1'] - oracle['tgt_f1']:>+11.4f}"
+              f"{mark}")
+    last = history[-1]
+    print(f"  {'last epoch':<12}{last['epoch']:>7}{'-':>10}{last['tgt_f1']:>13.4f}"
+          f"{last['tgt_f1'] - oracle['tgt_f1']:>+11.4f}"
+          f"{' *' if criterion == 'last' else '  '}")
+    print(f"  {'oracle':<12}{oracle['epoch']:>7}{'-':>10}{oracle['tgt_f1']:>13.4f}"
+          f"{0.0:>+11.4f}   (upper bound, not selectable)")
+    if best_epoch is not None:
+        print(f"  -> reporting epoch {best_epoch} chosen by '{criterion}'")
+    print("-" * 60)

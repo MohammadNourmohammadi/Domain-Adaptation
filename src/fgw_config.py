@@ -30,6 +30,23 @@ class FGWConfig:
     source_label_ratio: float = 1.0
     source_label_stratified: bool = False  # per-class draw vs. a pure random draw
 
+    # Fraction of the *revealed* source labels held out of the CE loss and used
+    # only for model selection. Without this there is no legitimate checkpoint
+    # criterion: the training log's src_f1 is measured on the very nodes just
+    # backpropped through, and picking an epoch by target metrics would be
+    # oracle selection. 0.0 disables the split (and falls back to last-epoch
+    # reporting unless an unsupervised criterion is chosen).
+    source_val_frac: float = 0.2
+
+    # Checkpoint criterion. "src_val": pooled held-out source macro-F1 (the
+    # honest default). "snd" / "entropy": unsupervised target criteria, usable
+    # when no source labels may be held out. "last": report the final epoch.
+    # Target labels are never a selection input under any setting; the oracle
+    # target number is printed for reference only.
+    model_selection: str = "src_val"
+    snd_temp: float = 0.05        # SND similarity softmax temperature
+    snd_max_nodes: int = 2000     # subsample cap for the O(N^2) SND matrix
+
     # --------------------------------------------------------------- encoder
     proj_dim: int = 64
     hidden_dim: int = 32          # = d, the FGW embedding dimension

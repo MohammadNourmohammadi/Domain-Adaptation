@@ -33,6 +33,12 @@ def parse_args() -> FGWConfig:
     parser.add_argument("--source_label_stratified", action="store_true",
                         help="draw the labeled subset per-class (stratified) "
                              "instead of a pure random draw over all nodes")
+    parser.add_argument("--source_val_frac", type=float, default=0.2,
+                        help="fraction of the revealed source labels held out "
+                             "of the loss and used for model selection")
+    parser.add_argument("--model_selection", type=str, default="src_val",
+                        choices=["src_val", "snd", "entropy", "last"],
+                        help="checkpoint criterion (target labels are never used)")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=5e-3)
@@ -90,6 +96,8 @@ def parse_args() -> FGWConfig:
         target_domain=args.target,
         source_label_ratio=args.source_label_ratio,
         source_label_stratified=args.source_label_stratified,
+        source_val_frac=args.source_val_frac,
+        model_selection=args.model_selection,
         epochs=args.epochs,
         lr=args.lr,
         weight_decay=args.weight_decay,
@@ -136,6 +144,8 @@ def main():
     _draw = "stratified" if cfg.source_label_stratified else "random"
     print(f"  Source labels : {cfg.source_label_ratio:.0%} ({_draw} draw; "
           f"target 0%)")
+    print(f"  Selection     : {cfg.model_selection} "
+          f"({cfg.source_val_frac:.0%} of source labels held out)")
     print(f"  Device        : {cfg.device}")
     print(f"  proj/hidden   : {cfg.proj_dim} / {cfg.hidden_dim}")
     print(f"  ego_size k    : {cfg.ego_size}")
