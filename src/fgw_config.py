@@ -65,7 +65,9 @@ class FGWConfig:
 
     # ----------------------------------------------------------- loss weights
     lambda_proto: float = 0.3     # aux source CE through FGW (keeps protos
-                                  # class-meaningful)
+                                  # class-meaningful so alignment has anchors)
+    lambda_align: float = 1.0
+    lambda_ent: float = 0.5
     lambda_sep: float = 1.0
     lambda_pl: float = 0.1
     lambda_vrex: float = 1.0
@@ -79,8 +81,9 @@ class FGWConfig:
     lr: float = 1e-3
     weight_decay: float = 5e-3
     epochs: int = 100
-    warmup_frac: float = 0.8      # fraction of epochs with L_cls (+ L_sep) only;
-                                  # the remainder is the refine phase (adds L_pl)
+    warmup_frac: float = 0.2      # fraction of epochs with L_cls (+ L_sep) only
+    refine_frac: float = 0.6      # after this fraction, enable L_pl
+    ramp_epochs: int = 20         # sigmoid ramp on align/ent weights
 
     # ----------------------------------------------- mini-batching over nodes
     nodes_per_step: int = 128

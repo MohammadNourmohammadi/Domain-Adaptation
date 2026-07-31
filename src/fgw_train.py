@@ -1,20 +1,23 @@
 """Training loop for the FGW prototype-graph DA method.
 
 Prediction is parametric: a 2-layer MLP head on the encoder produces the
-class logits used for the supervised source loss, evaluation and
-pseudo-labels. The FGW prototype machinery feeds an auxiliary source term
-(L_proto) that keeps the prototypes class-meaningful.
+class logits used for the supervised source loss, evaluation, IM and
+pseudo-labels. The FGW prototype machinery is used for *transfer* only
+(target alignment + an auxiliary source term that keeps the prototypes
+class-meaningful). Decoupling the prediction head from the FGW distances
+is what prevents the alignment objective from collapsing the classifier
+to the uniform ln-2 fixed point.
 
-Two phases (controlled by `cfg.warmup_frac`):
+Three phases (controlled by `cfg.warmup_frac`, `cfg.refine_frac`):
 
   1. WARM-UP    – L_cls + L_proto (+ L_sep + L_vrex + L_struct). The head
                   and the prototypes must become meaningful before any
-                  target signal is introduced.
-  2. REFINE     – additionally enable confidence-thresholded pseudo-label
+                  target signal is introduced; aligning to random
+                  prototypes just injects noise.
+  2. ADAPT      – ramp lambda_align and lambda_ent from 0 to their full
+                  values with the same sigmoid schedule used for GRL.
+  3. REFINE     – additionally enable confidence-thresholded pseudo-label
                   cross-entropy on the target.
-
-The target-alignment (L_align) and information-maximisation (L_ent) terms
-have been removed, so pseudo-labelling is the only target-side signal.
 
 With `cfg.no_da` the prototypes and every target term are switched off,
 leaving a pure encoder+head source-supervised baseline (the diagnostic
@@ -25,18 +28,21 @@ full graph once (cheap) and then samples `cfg.nodes_per_step` seeds
 from each source / target to form FGW problems.
 """
 
+import math
 from typing import List
 
 import torch
 import torch.nn.functional as Fnn
 from torch_geometric.data import Data
 
-from .fgw_classifier import fgw_logits
+from .fgw_classifier import fgw_class_distances, fgw_logits
 from .fgw_config import FGWConfig
 from .fgw_distance import pairwise_fgw_distances
 from .fgw_ego import EgoGraphCache, build_ego_batch_from_cache
 from .fgw_losses import (
+    align_loss,
     cls_loss,
+    im_loss,
     pseudo_label_loss,
     separation_loss,
     struct_l1_loss,
@@ -47,8 +53,17 @@ from .utils import compute_metrics
 
 
 # ---------------------------------------------------------------------- schedule
-def _phase(epoch: int, total: int, warmup_frac: float) -> str:
-    return "warmup" if epoch <= int(warmup_frac * total) else "refine"
+def _ramp(epoch: int, ramp_epochs: int) -> float:
+    p = min(epoch / max(ramp_epochs, 1), 1.0)
+    return 2.0 / (1.0 + math.exp(-10.0 * p)) - 1.0
+
+
+def _phase(epoch: int, total: int, warmup_frac: float, refine_frac: float) -> str:
+    if epoch <= int(warmup_frac * total):
+        return "warmup"
+    if epoch <= int(refine_frac * total):
+        return "adapt"
+    return "refine"
 
 
 # ---------------------------------------------------------------------- caches
@@ -114,6 +129,7 @@ def train_step(
     target: Data,
     src_caches: List[EgoGraphCache],
     src_labeled: List[torch.Tensor],
+    tgt_cache: EgoGraphCache,
     optimizer: torch.optim.Optimizer,
     cfg: FGWConfig,
     epoch: int,
@@ -121,7 +137,10 @@ def train_step(
     model.train()
     device = target.x.device
     da = not cfg.no_da
-    phase = _phase(epoch, cfg.epochs, cfg.warmup_frac) if da else "srconly"
+    phase = _phase(epoch, cfg.epochs, cfg.warmup_frac, cfg.refine_frac) if da else "srconly"
+    ramp = _ramp(epoch, cfg.ramp_epochs)
+    align_w = cfg.lambda_align * ramp if (da and phase != "warmup") else 0.0
+    ent_w = cfg.lambda_ent * ramp if (da and phase != "warmup") else 0.0
     pl_w = cfg.lambda_pl if (da and phase == "refine") else 0.0
     proto_w = cfg.lambda_proto if da else 0.0
 
@@ -174,16 +193,35 @@ def train_step(
         else L_cls.new_zeros(())
     )
 
-    # ------------------------------------------------------------ target PL
+    # -------------------------------------------------- target align + IM (+ PL)
     zero = L_cls.new_zeros(())
-    L_pl = zero
-    if pl_w > 0:
+    L_align = L_ent = L_pl = zero
+    if da and (align_w > 0 or ent_w > 0 or pl_w > 0):
         tgt_emb = model.encode(target.x, target.edge_index)
         n_t = min(cfg.nodes_per_step, target.num_nodes)
         seeds_t = torch.randperm(target.num_nodes, device=device)[:n_t]
         head_logits_t = model.classify(tgt_emb[seeds_t])
         p_t = Fnn.softmax(head_logits_t, dim=1)
-        L_pl = pseudo_label_loss(head_logits_t, p_t.detach(), cfg.pl_threshold)
+
+        if ent_w > 0:
+            L_ent = im_loss(p_t)
+        if pl_w > 0:
+            L_pl = pseudo_label_loss(head_logits_t, p_t.detach(), cfg.pl_threshold)
+        if align_w > 0:
+            Fe_t, Ce_t, he_t = build_ego_batch_from_cache(
+                tgt_cache, tgt_emb, seeds_t,
+                anchor_weight=cfg.anchor_weight,
+                anchor_mass_extra=cfg.anchor_mass_extra,
+            )
+            d_bcm_t = pairwise_fgw_distances(
+                Fe_t, Ce_t, he_t, Fp, Cp, q,
+                alpha=cfg.fgw_alpha, epsilon=cfg.fgw_epsilon,
+                max_iter=cfg.fgw_max_iter,
+            )
+            d_bc_t = fgw_class_distances(d_bcm_t, cfg.tau)
+            # DEC assignment driven by the *head*'s prediction: pull each
+            # target ego toward the prototype of its predicted class.
+            L_align = align_loss(d_bc_t, p_t)
 
     # ---------------------------------------------------- prototype regularisers
     L_sep = L_struct = zero
@@ -199,6 +237,8 @@ def train_step(
     loss = (
         L_cls
         + proto_w * L_proto
+        + align_w * L_align
+        + ent_w * L_ent
         + cfg.lambda_sep * L_sep
         + cfg.lambda_vrex * L_vrex
         + cfg.lambda_struct * L_struct
@@ -213,12 +253,15 @@ def train_step(
         "loss": loss.item(),
         "L_cls": L_cls.item(),
         "L_proto": L_proto.item(),
+        "L_align": L_align.item(),
+        "L_ent": L_ent.item(),
         "L_sep": L_sep.item(),
         "L_vrex": L_vrex.item(),
         "L_struct": L_struct.item(),
         "L_pl": L_pl.item(),
         "phase": phase,
-        "pl_w": pl_w,
+        "align_w": align_w,
+        "ent_w": ent_w,
         "src_f1_mean": sum(m["f1"] for m in per_src_metrics) / len(per_src_metrics),
     }
 
@@ -267,15 +310,17 @@ def run_training(
         # Pure source-supervised baseline: the head never touches the FGW
         # machinery, so there is no need to precompute any ego-graphs.
         src_caches = [None for _ in sources]
+        tgt_cache = None
     else:
-        # Only the labeled source subset is ever seeded (see train_step), so
-        # restrict the precompute to those nodes. When a source is fully labeled
-        # (ratio >= 1) fall back to the all-nodes path to skip building an
-        # identity row map. The target needs no cache at all now that the FGW
-        # distances are used exclusively for the source-side L_proto term.
+        # Sources: only the labeled subset is ever seeded (see train_step), so
+        # restrict the precompute to those nodes. Target: every node may be
+        # sampled for alignment/IM, so precompute all of them. When a source is
+        # fully labeled (ratio >= 1) fall back to the all-nodes path to skip
+        # building an identity row map.
         n_src_seeds = sum(lab.numel() for lab in src_labeled)
         print(
-            f"Precomputing PPR ego-graphs (sources: {n_src_seeds} labeled seeds) ..."
+            f"Precomputing PPR ego-graphs (sources: {n_src_seeds} labeled seeds, "
+            f"target: {target.num_nodes} nodes) ..."
         )
         src_caches = [
             _make_cache(
@@ -284,6 +329,7 @@ def run_training(
             )
             for s, lab in zip(sources, src_labeled)
         ]
+        tgt_cache = _make_cache(target, cfg, device)
 
     optimizer = torch.optim.Adam(
         model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay,
@@ -294,7 +340,7 @@ def run_training(
     # snapshot.
     for epoch in range(1, cfg.epochs + 1):
         stats = train_step(
-            model, sources, target, src_caches, src_labeled,
+            model, sources, target, src_caches, src_labeled, tgt_cache,
             optimizer, cfg, epoch,
         )
         if epoch == 1 or epoch % 5 == 0 or epoch == cfg.epochs:
@@ -304,9 +350,11 @@ def run_training(
                 f"loss {stats['loss']:.4f}  "
                 f"cls {stats['L_cls']:.4f}  "
                 f"pr {stats['L_proto']:.4f}  "
+                f"al(w={stats['align_w']:.2f}) {stats['L_align']:.4f}  "
+                f"ent {stats['L_ent']:.4f}  "
                 f"sep {stats['L_sep']:.4f}  "
                 f"vx {stats['L_vrex']:.4f}  "
-                f"pl(w={stats['pl_w']:.2f}) {stats['L_pl']:.4f} | "
+                f"pl {stats['L_pl']:.4f} | "
                 f"src_f1 {stats['src_f1_mean']:.4f} | "
                 f"tgt ACC {tgt_stats['acc']:.4f}  "
                 f"AUROC {tgt_stats['auc']:.4f}  "

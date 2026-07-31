@@ -66,6 +66,8 @@ def parse_args() -> FGWConfig:
     parser.add_argument("--fgw_epsilon", type=float, default=0.05)
     parser.add_argument("--tau", type=float, default=0.5)
     parser.add_argument("--lambda_proto", type=float, default=0.3)
+    parser.add_argument("--lambda_align", type=float, default=1.0)
+    parser.add_argument("--lambda_ent", type=float, default=0.5)
     parser.add_argument("--lambda_sep", type=float, default=1.0)
     parser.add_argument("--lambda_pl", type=float, default=0.1)
     parser.add_argument("--lambda_vrex", type=float, default=1.0)
@@ -73,7 +75,9 @@ def parse_args() -> FGWConfig:
     parser.add_argument("--sep_intra_margin", type=float, default=0.5)
     parser.add_argument("--pl_threshold", type=float, default=0.8)
     parser.add_argument("--nodes_per_step", type=int, default=128)
-    parser.add_argument("--warmup_frac", type=float, default=0.8)
+    parser.add_argument("--warmup_frac", type=float, default=0.2)
+    parser.add_argument("--refine_frac", type=float, default=0.6)
+    parser.add_argument("--ramp_epochs", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--directed", action="store_true",
                         help="keep citation edges directed (default: symmetrise)")
@@ -125,6 +129,8 @@ def parse_args() -> FGWConfig:
         fgw_epsilon=args.fgw_epsilon,
         tau=args.tau,
         lambda_proto=args.lambda_proto,
+        lambda_align=args.lambda_align,
+        lambda_ent=args.lambda_ent,
         lambda_sep=args.lambda_sep,
         lambda_pl=args.lambda_pl,
         lambda_vrex=args.lambda_vrex,
@@ -134,6 +140,8 @@ def parse_args() -> FGWConfig:
         target_class_prior=None,
         nodes_per_step=args.nodes_per_step,
         warmup_frac=args.warmup_frac,
+        refine_frac=args.refine_frac,
+        ramp_epochs=args.ramp_epochs,
         seed=args.seed,
         device=device,
     )

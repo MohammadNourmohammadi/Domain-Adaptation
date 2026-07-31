@@ -102,7 +102,8 @@ class EgoGraphCache:
     ) -> None:
         """Fill the neighbour list and structure tensor for the seed nodes.
 
-        `seed_nodes=None` precomputes every node. Passing an
+        `seed_nodes=None` precomputes every node — required for the target,
+        whose alignment/IM samples seeds from the whole graph. Passing an
         explicit index tensor restricts the expensive work (PPR power-iteration
         + the per-node scipy shortest-path solve) to just those seeds. Source
         graphs use this: only the labeled supervision subset is ever seeded into
