@@ -138,7 +138,12 @@ def train_step(
     device = target.x.device
     da = not cfg.no_da
     phase = _phase(epoch, cfg.epochs, cfg.warmup_frac, cfg.refine_frac) if da else "srconly"
-    ramp = _ramp(epoch, cfg.ramp_epochs)
+    # The ramp must be measured from the *end of warmup*, not from epoch 0:
+    # alignment is off during warmup, so counting absolute epochs would leave the
+    # ramp already saturated (~1.0) on the first adapt epoch and slam the weight
+    # from 0 to full in a single step.
+    warm_epochs = int(cfg.warmup_frac * cfg.epochs)
+    ramp = _ramp(max(epoch - warm_epochs, 0), cfg.ramp_epochs)
     align_w = cfg.lambda_align * ramp if (da and phase != "warmup") else 0.0
     ent_w = cfg.lambda_ent * ramp if (da and phase != "warmup") else 0.0
     pl_w = cfg.lambda_pl if (da and phase == "refine") else 0.0
