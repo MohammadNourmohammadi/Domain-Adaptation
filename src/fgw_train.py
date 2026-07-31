@@ -220,8 +220,10 @@ def train_step(
             )
             d_bc_t = fgw_class_distances(d_bcm_t, cfg.tau)
             # DEC assignment driven by the *head*'s prediction: pull each
-            # target ego toward the prototype of its predicted class.
-            L_align = align_loss(d_bc_t, p_t)
+            # target ego toward the prototype of its predicted class and
+            # away from the others. Contrastive (softmax over classes), so
+            # uniformly shrinking every distance does not reduce the loss.
+            L_align = align_loss(d_bc_t, p_t, cfg.tau)
 
     # ---------------------------------------------------- prototype regularisers
     L_sep = L_struct = zero

@@ -30,18 +30,31 @@ def cls_loss(logits: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 
 
 # --------------------------------------------------------------------- 2
-def align_loss(d_bc: torch.Tensor, p_bc: torch.Tensor) -> torch.Tensor:
-    """L_align = mean_v sum_c q(c|v) * d_c(v) with a sharpened, detached q.
+def align_loss(d_bc: torch.Tensor, p_bc: torch.Tensor, tau: float) -> torch.Tensor:
+    """L_align = mean_v KL(q(.|v) || softmax(-d(v)/tau)), up to a constant.
 
     DEC-style soft assignment: q_ic ∝ p_ic^2 / sum_i p_ic, then row-norm.
     The square sharpens the assignment and the per-class division
-    self-balances classes, which guards against the trivial collapse.
+    self-balances classes.
+
+    The score is the *relative* ordering of the class distances, not their
+    magnitude. The earlier form `sum_c q_c * d_c` was minimised by shrinking
+    every d_c alike: its gradient w.r.t. every distance was non-negative, so
+    nothing was ever pushed apart and the cheapest descent direction was to
+    park all prototypes on the centroid of the embedding cloud, at which
+    point d_c(v) carries no class information at all. `log_softmax(-d/tau)`
+    is unchanged by d -> d + const, so uniform shrinkage now buys nothing;
+    the only way down is d_ĉ(v) < d_{c≠ĉ}(v).
+
+    `tau` is the same soft-min temperature used by `fgw_logits`, so this
+    scores the target exactly as `L_proto` scores the sources.
     """
     with torch.no_grad():
         f_c = p_bc.sum(dim=0).clamp_min(_EPS)
         q = (p_bc ** 2) / f_c
         q = q / q.sum(dim=1, keepdim=True).clamp_min(_EPS)
-    return (q * d_bc).sum(dim=1).mean()
+    log_post = F.log_softmax(-d_bc / tau, dim=1)
+    return -(q * log_post).sum(dim=1).mean()
 
 
 # --------------------------------------------------------------------- 3
