@@ -62,10 +62,15 @@ class FGWPrototypeDA(nn.Module):
         head_dropout: float = 0.5,
         use_layernorm: bool = True,
         embed_init_scale: float = 1.0,
+        frozen_proj: bool = False,
     ):
         super().__init__()
+        # `frozen_proj` swaps the learned BoW projection for a fixed basis that
+        # `run_training` fits by unsupervised SVD — see `fgw_encoder`.
         self.encoder = SharedGCNEncoder(
-            in_dim, proj_dim, hidden_dim, use_layernorm=use_layernorm,
+            in_dim, proj_dim, hidden_dim,
+            use_layernorm=use_layernorm,
+            frozen_proj=frozen_proj,
         )
         self.head = ClassifierHead(
             in_dim=hidden_dim,

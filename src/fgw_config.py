@@ -48,9 +48,17 @@ class FGWConfig:
     snd_max_nodes: int = 2000     # subsample cap for the O(N^2) SND matrix
 
     # --------------------------------------------------------------- encoder
-    proj_dim: int = 64
+    proj_dim: int = 128
     hidden_dim: int = 32          # = d, the FGW embedding dimension
     use_layernorm: bool = True    # LayerNorm encoder output (scale-match FGW)
+
+    # Replace the learned Linear(feature_dim, proj_dim) with a frozen basis of
+    # the top `proj_dim` right singular vectors of the stacked (unlabeled)
+    # feature matrix. The learned version is >90% of the model's parameters and
+    # ~100 parameters per labeled node under a 10% budget, so it memorises the
+    # seeds within a few dozen epochs; the SVD basis is fitted without labels
+    # and leaves 0 trainable parameters in that layer.
+    svd_proj: bool = True
 
     # ------------------------------------------------- parametric classifier
     head_hidden: int = 32         # hidden width of the MLP prediction head
@@ -98,9 +106,26 @@ class FGWConfig:
     lr: float = 1e-3
     weight_decay: float = 5e-3
     epochs: int = 100
-    warmup_frac: float = 0.2      # fraction of epochs with L_cls (+ L_sep) only
-    refine_frac: float = 0.6      # after this fraction, enable L_pl
+
+    # Phase lengths are *absolute epoch counts*, not fractions of `epochs`.
+    # Fractions coupled the schedule to the budget the wrong way round: with
+    # warmup_frac=0.2, --epochs 350 started adapting at 70 and --epochs 1000 at
+    # 200, so raising the budget only bought more epochs of overfitting before
+    # any target signal arrived (and both runs then selected the same
+    # checkpoint). The encoder saturates in a few dozen epochs regardless of
+    # how long the run is, so the switch has to be pinned to that scale.
+    warmup_epochs: int = 60       # hard cap on warm-up (L_cls + L_proto only)
+    adapt_epochs: int = 120       # epochs of ramped align/IM before refine
     ramp_epochs: int = 20         # sigmoid ramp on align/ent weights
+
+    # Warm-up normally ends *before* `warmup_epochs` on a held-out-source-F1
+    # plateau: no improvement over the running best for `warmup_patience`
+    # consecutive epochs. The best warm-up checkpoint is then restored before
+    # adaptation starts — adapting from an already-overfit encoder leaves
+    # nothing worth preserving. Needs `source_val_frac > 0`; without it the
+    # switch falls back to the fixed `warmup_epochs` cap.
+    warmup_patience: int = 15
+    warmup_min_delta: float = 1e-4  # F1 gain that counts as an improvement
 
     # ----------------------------------------------- mini-batching over nodes
     nodes_per_step: int = 128

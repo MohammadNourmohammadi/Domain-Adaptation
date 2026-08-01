@@ -8,14 +8,19 @@ class-meaningful). Decoupling the prediction head from the FGW distances
 is what prevents the alignment objective from collapsing the classifier
 to the uniform ln-2 fixed point.
 
-Three phases (controlled by `cfg.warmup_frac`, `cfg.refine_frac`):
+Three phases, driven by `PhaseScheduler` (absolute epoch counts plus a
+validation-plateau trigger — *not* fractions of `cfg.epochs`):
 
   1. WARM-UP    – L_cls + L_proto (+ L_sep + L_vrex + L_struct). The head
                   and the prototypes must become meaningful before any
                   target signal is introduced; aligning to random
-                  prototypes just injects noise.
+                  prototypes just injects noise. Ends as soon as held-out
+                  source macro-F1 plateaus (or at `cfg.warmup_epochs`),
+                  and the best warm-up checkpoint is restored before
+                  adaptation begins.
   2. ADAPT      – ramp lambda_align and lambda_ent from 0 to their full
                   values with the same sigmoid schedule used for GRL.
+                  Lasts `cfg.adapt_epochs`.
   3. REFINE     – additionally enable confidence-thresholded pseudo-label
                   cross-entropy on the target.
 
@@ -44,6 +49,7 @@ from .fgw_classifier import fgw_class_distances, fgw_logits
 from .fgw_config import FGWConfig
 from .fgw_distance import pairwise_fgw_distances
 from .fgw_ego import EgoGraphCache, build_ego_batch_from_cache
+from .fgw_encoder import svd_projection
 from .fgw_losses import (
     align_loss,
     cls_loss,
@@ -63,12 +69,88 @@ def _ramp(epoch: int, ramp_epochs: int) -> float:
     return 2.0 / (1.0 + math.exp(-10.0 * p)) - 1.0
 
 
-def _phase(epoch: int, total: int, warmup_frac: float, refine_frac: float) -> str:
-    if epoch <= int(warmup_frac * total):
-        return "warmup"
-    if epoch <= int(refine_frac * total):
-        return "adapt"
-    return "refine"
+class PhaseScheduler:
+    """warmup -> adapt -> refine on absolute epoch counts + a val plateau.
+
+    Two things this fixes over the old fractional schedule:
+
+    * **Absolute lengths.** The encoder overfits the (small) labeled seed set
+      on a fixed timescale of a few dozen epochs; that has nothing to do with
+      how many epochs the run was given. Tying warm-up to a fraction of
+      `cfg.epochs` meant a longer budget started adapting *later*, i.e. from a
+      more thoroughly overfit model.
+    * **Rewind on switch.** Warm-up stops at the first plateau of held-out
+      source macro-F1 and the best warm-up weights are restored before the
+      target terms come on. Adapting from the post-plateau model would start
+      the transfer stage from an encoder that has already memorised its seeds.
+
+    The plateau trigger needs a held-out source split; with none available the
+    scheduler degrades to the fixed `warmup_epochs` cap (and no rewind, since
+    there is no honest signal to pick a checkpoint by).
+    """
+
+    def __init__(self, cfg: FGWConfig, plateau: bool):
+        self.warmup_epochs = max(int(getattr(cfg, "warmup_epochs", 60)), 1)
+        self.adapt_epochs = max(int(getattr(cfg, "adapt_epochs", 120)), 1)
+        self.patience = max(int(getattr(cfg, "warmup_patience", 15)), 1)
+        self.min_delta = float(getattr(cfg, "warmup_min_delta", 1e-4))
+        self.plateau = plateau
+
+        self.phase = "warmup"
+        self.adapt_start = None      # first epoch on which align/ent are live
+        self.best_val = -float("inf")
+        self.best_epoch = None
+        self.stale = 0
+        self._best_state = None
+
+    def ramp_position(self, epoch: int) -> int:
+        """Epochs elapsed since adaptation began (0 on the first adapt epoch).
+
+        The ramp must be measured from the end of warm-up, not from epoch 0:
+        alignment is off during warm-up, so absolute epochs would leave the
+        ramp already saturated on the first adapt epoch and slam the weight
+        from 0 to full in a single step.
+        """
+        return 0 if self.adapt_start is None else max(epoch - self.adapt_start, 0)
+
+    def needs_val(self) -> bool:
+        """Whether this epoch's plateau test requires a validation pass."""
+        return self.plateau and self.phase == "warmup"
+
+    def step(self, epoch: int, model, val_f1: float = None) -> str:
+        """Advance the phase after `epoch` finished; returns a log note or None."""
+        if self.phase == "refine":
+            return None
+
+        if self.phase == "warmup":
+            if self.plateau and val_f1 is not None and val_f1 == val_f1:
+                if val_f1 > self.best_val + self.min_delta:
+                    self.best_val, self.best_epoch, self.stale = val_f1, epoch, 0
+                    self._best_state = {
+                        k: v.detach().clone() for k, v in model.state_dict().items()
+                    }
+                else:
+                    self.stale += 1
+            plateaued = self.plateau and self.stale >= self.patience
+            if not (plateaued or epoch >= self.warmup_epochs):
+                return None
+            self.phase = "adapt"
+            self.adapt_start = epoch + 1
+            why = (f"val plateau ({self.stale} epochs without a gain)" if plateaued
+                   else f"warmup_epochs cap ({self.warmup_epochs})")
+            note = f"[phase] warmup -> adapt at epoch {epoch + 1}: {why}"
+            if self._best_state is not None:
+                model.load_state_dict(self._best_state)
+                note += (f"; rewound to the warm-up best (epoch "
+                         f"{self.best_epoch}, src_val_f1 {self.best_val:.4f})")
+                self._best_state = None      # the rewind is one-shot; free it
+            return note
+
+        if epoch - self.adapt_start >= self.adapt_epochs - 1:
+            self.phase = "refine"
+            return (f"[phase] adapt -> refine at epoch {epoch + 1} "
+                    f"(after {self.adapt_epochs} adapt epochs)")
+        return None
 
 
 # ---------------------------------------------------------------------- caches
@@ -179,17 +261,16 @@ def train_step(
     optimizer: torch.optim.Optimizer,
     cfg: FGWConfig,
     epoch: int,
+    phase: str,
+    ramp_pos: int = 0,
 ) -> dict:
+    """One optimisation step. `phase` and `ramp_pos` come from the
+    `PhaseScheduler` (which owns the warm-up plateau test), so the schedule is
+    not re-derived from `epoch` here."""
     model.train()
     device = target.x.device
     da = not cfg.no_da
-    phase = _phase(epoch, cfg.epochs, cfg.warmup_frac, cfg.refine_frac) if da else "srconly"
-    # The ramp must be measured from the *end of warmup*, not from epoch 0:
-    # alignment is off during warmup, so counting absolute epochs would leave the
-    # ramp already saturated (~1.0) on the first adapt epoch and slam the weight
-    # from 0 to full in a single step.
-    warm_epochs = int(cfg.warmup_frac * cfg.epochs)
-    ramp = _ramp(max(epoch - warm_epochs, 0), cfg.ramp_epochs)
+    ramp = _ramp(ramp_pos, cfg.ramp_epochs)
     align_w = cfg.lambda_align * ramp if (da and phase != "warmup") else 0.0
     ent_w = cfg.lambda_ent * ramp if (da and phase != "warmup") else 0.0
     pl_w = cfg.lambda_pl if (da and phase == "refine") else 0.0
@@ -411,6 +492,21 @@ def run_training(
     target = target.to(device)
     model = model.to(device)
 
+    # Frozen input projection: fit the basis on the stacked feature matrix of
+    # every graph before anything is trained. No labels are involved, so this is
+    # not model selection or leakage — it is a data-dependent change of basis
+    # that removes the single biggest source of overfitting (the learned
+    # feature_dim x proj_dim layer).
+    if getattr(model.encoder, "frozen_proj", False):
+        in_dim, proj_dim = model.encoder.in_dim, model.encoder.proj_dim
+        n_nodes = sum(s.num_nodes for s in sources) + target.num_nodes
+        model.encoder.set_projection(
+            svd_projection([s.x for s in sources] + [target.x], proj_dim)
+        )
+        print(f"Frozen SVD input projection: {in_dim} -> {proj_dim} "
+              f"(fitted on {n_nodes} unlabeled nodes, "
+              f"{in_dim * proj_dim:,} trainable params removed)")
+
     # Supervision budget: fix a labeled subset per source graph for the whole run
     # (the target is never labeled during training). Uses the already-seeded
     # global RNG, so the split is deterministic per seed and re-drawn each run.
@@ -482,14 +578,40 @@ def run_training(
     best_score = -float("inf")
     best_epoch = None
 
+    # Phase schedule. The plateau trigger (and the rewind that goes with it)
+    # needs the held-out source split; without it warm-up just runs to its cap.
+    sched = PhaseScheduler(cfg, plateau=n_val_total > 0)
+    if not cfg.no_da:
+        trigger = (f"held-out source F1 plateau (patience {sched.patience}) "
+                   f"or {sched.warmup_epochs} epochs"
+                   if sched.plateau else f"{sched.warmup_epochs} epochs (fixed: "
+                   "no source validation split)")
+        print(f"Schedule: warmup until {trigger}, then {sched.adapt_epochs} "
+              f"adapt epochs (ramp {cfg.ramp_epochs}), then refine.")
+        if sched.warmup_epochs >= cfg.epochs:
+            print(f"  ! warmup_epochs ({sched.warmup_epochs}) >= epochs "
+                  f"({cfg.epochs}): adaptation may never start.")
+
     for epoch in range(1, cfg.epochs + 1):
+        phase = sched.phase if not cfg.no_da else "srconly"
         stats = train_step(
             model, sources, target, src_caches, src_labeled, tgt_cache,
             optimizer, cfg, epoch,
+            phase=phase, ramp_pos=sched.ramp_position(epoch),
         )
-        if epoch == 1 or epoch % 5 == 0 or epoch == cfg.epochs:
+
+        is_eval = epoch == 1 or epoch % 5 == 0 or epoch == cfg.epochs
+        # During warm-up the plateau test needs the validation score every
+        # epoch, not just on the 5-epoch logging cadence — a switch that only
+        # fires on multiples of 5 blurs the very boundary this is detecting.
+        # It is a couple of cheap encodes; no ego-graphs or FGW solves.
+        val_stats = (
+            _source_val_metrics(model, sources, src_val)
+            if is_eval or sched.needs_val() else None
+        )
+
+        if is_eval:
             tgt_stats = evaluate(model, target)
-            val_stats = _source_val_metrics(model, sources, src_val)
             unsup = _target_criteria(model, target, snd_sub, snd_temp)
             record = {
                 "epoch": epoch,
@@ -530,6 +652,20 @@ def run_training(
                 f"AUROC {tgt_stats['auc']:.4f}  "
                 f"MacroF {tgt_stats['f1']:.4f}"
             )
+
+        if not cfg.no_da:
+            note = sched.step(
+                epoch, model, val_stats["f1"] if val_stats else None,
+            )
+            if note:
+                print(note)
+            if phase == "warmup" and sched.phase == "adapt":
+                # Adam's moment estimates describe the gradients of the run we
+                # just rewound out of, and the loss surface changes anyway when
+                # the target terms come on. Start the adapt stage clean.
+                optimizer = torch.optim.Adam(
+                    model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay,
+                )
 
     _report_selection(history, criterion, best_epoch)
 

@@ -42,8 +42,13 @@ def parse_args() -> FGWConfig:
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=5e-3)
-    parser.add_argument("--proj_dim", type=int, default=64)
+    parser.add_argument("--proj_dim", type=int, default=128)
     parser.add_argument("--hidden_dim", type=int, default=32)
+    parser.add_argument("--no_svd_proj", action="store_true",
+                        help="learn the input projection instead of freezing it "
+                             "to the unsupervised SVD basis (the learned layer "
+                             "is >90%% of the parameters and overfits the small "
+                             "label budget within a few dozen epochs)")
     parser.add_argument("--ego_size", type=int, default=32)
     parser.add_argument("--proto_size", type=int, default=32)
     parser.add_argument("--num_protos", type=int, default=3)
@@ -70,8 +75,16 @@ def parse_args() -> FGWConfig:
                         metavar=("P0", "P1"),
                         help="known target class prior, e.g. --target_prior 0.454 0.546")
     parser.add_argument("--nodes_per_step", type=int, default=128)
-    parser.add_argument("--warmup_frac", type=float, default=0.2)
-    parser.add_argument("--refine_frac", type=float, default=0.6)
+    parser.add_argument("--warmup_epochs", type=int, default=60,
+                        help="hard cap on the warm-up phase, in absolute epochs "
+                             "(it normally ends earlier, on a held-out source "
+                             "F1 plateau)")
+    parser.add_argument("--adapt_epochs", type=int, default=120,
+                        help="absolute number of adapt epochs before refine")
+    parser.add_argument("--warmup_patience", type=int, default=15,
+                        help="epochs without a held-out source F1 gain that end "
+                             "warm-up (the best warm-up checkpoint is restored "
+                             "before adaptation starts)")
     parser.add_argument("--ramp_epochs", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -103,6 +116,7 @@ def parse_args() -> FGWConfig:
         weight_decay=args.weight_decay,
         proj_dim=args.proj_dim,
         hidden_dim=args.hidden_dim,
+        svd_proj=not args.no_svd_proj,
         use_layernorm=not args.no_layernorm,
         head_hidden=head_hidden,
         head_dropout=args.head_dropout,
@@ -124,8 +138,9 @@ def parse_args() -> FGWConfig:
         pl_threshold=args.pl_threshold,
         target_class_prior=target_prior,
         nodes_per_step=args.nodes_per_step,
-        warmup_frac=args.warmup_frac,
-        refine_frac=args.refine_frac,
+        warmup_epochs=args.warmup_epochs,
+        adapt_epochs=args.adapt_epochs,
+        warmup_patience=args.warmup_patience,
         ramp_epochs=args.ramp_epochs,
         seed=args.seed,
         device=device,
@@ -147,7 +162,11 @@ def main():
     print(f"  Selection     : {cfg.model_selection} "
           f"({cfg.source_val_frac:.0%} of source labels held out)")
     print(f"  Device        : {cfg.device}")
-    print(f"  proj/hidden   : {cfg.proj_dim} / {cfg.hidden_dim}")
+    print(f"  proj/hidden   : {cfg.proj_dim} / {cfg.hidden_dim}"
+          f"{'  (frozen SVD basis)' if cfg.svd_proj else '  (learned proj)'}")
+    print(f"  schedule      : warmup <= {cfg.warmup_epochs} (patience "
+          f"{cfg.warmup_patience}) -> adapt {cfg.adapt_epochs} -> refine, "
+          f"of {cfg.epochs} epochs")
     print(f"  ego_size k    : {cfg.ego_size}")
     print(f"  proto_size n_p: {cfg.proto_size}  (M={cfg.num_protos} per class)")
     print(f"  fgw alpha,eps : {cfg.fgw_alpha}, {cfg.fgw_epsilon}")
@@ -188,6 +207,7 @@ def main():
         head_dropout=cfg.head_dropout,
         use_layernorm=cfg.use_layernorm,
         embed_init_scale=cfg.embed_init_scale,
+        frozen_proj=cfg.svd_proj,
     )
     total_params = sum(p.numel() for p in model.parameters())
     print(f"\nModel parameters: {total_params:,}")
