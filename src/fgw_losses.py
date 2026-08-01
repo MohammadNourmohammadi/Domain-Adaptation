@@ -9,13 +9,11 @@ Symbols follow the method note:
     L_cls      supervised cross-entropy on the sources
     L_align    target alignment to prototype manifolds (DEC-style)
     L_ent      information maximisation on the target
-    L_sep      inter-class prototype margin + intra-class decorrelation
+    L_sep      cosine repulsion between different classes' prototypes
     L_pl       confidence-thresholded pseudo-label cross-entropy
     L_vrex     variance of per-source risks
     L_struct   L1 penalty on prototype soft adjacencies
 """
-
-from typing import Callable, Optional
 
 import torch
 import torch.nn.functional as F
@@ -72,54 +70,48 @@ def im_loss(p_bc: torch.Tensor) -> torch.Tensor:
 
 
 # --------------------------------------------------------------------- 4
-def separation_loss(
-    proto_F: torch.Tensor,        # (C, M, n_p, d+1)
-    proto_C: torch.Tensor,        # (C, M, n_p, n_p)
-    proto_q: torch.Tensor,        # (n_p,)
-    alpha: float,
-    epsilon: Optional[float],
-    max_iter: int,
-    margin: float,
-    pairwise_fn: Callable,
-    intra_margin: float = 0.5,
-) -> torch.Tensor:
-    """Push inter-class prototypes apart; keep within-class ones diverse.
+def separation_loss(proto_Z: torch.Tensor) -> torch.Tensor:
+    """Cosine repulsion between the mean embeddings of different classes.
 
-    Reuses the same `pairwise_fgw_distances` machinery so the geometry
-    of "prototype-vs-prototype" matches "ego-vs-prototype".
+    `proto_Z` is (C, M, n_p, d): the prototype node embeddings. Each (class,
+    slot) is summarised by its mean node embedding, L2-normalised, and the loss
+    is the mean positive cosine similarity over every *cross-class* pair.
+
+    This replaces an FGW-based hinge, `relu(margin - inter_fgw_distance)` with
+    `margin = 1.0`, for two reasons:
+
+    * **It was unsatisfiable.** Inter-prototype FGW distance is bounded by the
+      embedding scale (LayerNorm'd, so O(1)) and the structure scale (C_p in
+      [0, 1]), while `L_align` and `L_proto` both pull every prototype onto the
+      same data manifold. The hinge therefore never reached zero and its value
+      grew roughly linearly with the epoch count — ~0.00095 x epoch, i.e. a
+      clock rather than a loss, reaching 58% of the total objective at epoch
+      1000 while the supervised term was 1.6% of it. Worse, the only way the
+      optimiser could reduce it was to inflate prototype magnitudes, which
+      saturated `fgw_logits` and periodically detonated the run through
+      `L_proto`'s gradient into the shared encoder.
+    * **It cost a (C*M) x (C*M) FGW solve every step**, which dominated the
+      per-step compute for a term that measured nothing.
+
+    The cosine form is bounded in [0, 1], is exactly satisfiable at 0 (any
+    arrangement where distinct classes' prototype means are orthogonal or
+    opposed), and is ~1000x cheaper. Within-class slots are deliberately left
+    unconstrained: their diversity is what the M-way soft-min in
+    `fgw_class_distances` is for, and the old `intra_margin` hinge only ever
+    fought the class-level signal.
     """
-    C, M, n_p, d_plus = proto_F.shape
-
-    F_flat = proto_F.reshape(C * M, n_p, d_plus)
-    C_flat = proto_C.reshape(C * M, n_p, n_p)
-    h_flat = proto_q.unsqueeze(0).expand(C * M, n_p)
-
-    dists = pairwise_fn(
-        F_flat, C_flat, h_flat,
-        proto_F, proto_C, proto_q,
-        alpha=alpha, epsilon=epsilon, max_iter=max_iter,
-    )  # (C*M, C, M)
-
-    device = dists.device
-    inter_mask = torch.ones(C * M, C, M, device=device)
-    intra_mask = torch.zeros(C * M, C, M, device=device)
-    for c1 in range(C):
-        for m1 in range(M):
-            i = c1 * M + m1
-            inter_mask[i, c1, :] = 0.0
-            intra_mask[i, c1, :] = 1.0
-            intra_mask[i, c1, m1] = 0.0  # exclude self-pair
-
-    inter_sum = inter_mask.sum().clamp_min(1.0)
-    intra_sum = intra_mask.sum().clamp_min(1.0)
-    inter = (dists * inter_mask).sum() / inter_sum
-    intra = (dists * intra_mask).sum() / intra_sum
-
-    # Two bounded hinges: push inter-class prototypes apart up to `margin`,
-    # and penalise within-class prototypes only while they are *closer*
-    # than `intra_margin`. The old `- intra` term was unbounded below and
-    # perversely rewarded spreading within-class prototypes without limit.
-    return F.relu(margin - inter) + F.relu(intra_margin - intra)
+    C, M = proto_Z.shape[:2]
+    mu = F.normalize(proto_Z.mean(dim=2), dim=-1)                  # (C, M, d)
+    S = torch.einsum("cmd,end->cmen", mu, mu)                      # (C, M, C, M)
+    same = (
+        torch.eye(C, device=proto_Z.device, dtype=torch.bool)
+        .view(C, 1, C, 1)
+        .expand_as(S)
+    )
+    inter = S[~same]
+    if inter.numel() == 0:                 # single class: nothing to separate
+        return proto_Z.new_zeros(())
+    return F.relu(inter).mean()
 
 
 # --------------------------------------------------------------------- 5

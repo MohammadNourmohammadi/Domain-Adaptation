@@ -11,7 +11,7 @@ to the uniform ln-2 fixed point.
 Three phases, driven by `PhaseScheduler` (absolute epoch counts plus a
 validation-plateau trigger — *not* fractions of `cfg.epochs`):
 
-  1. WARM-UP    – L_cls + L_proto (+ L_sep + L_vrex + L_struct). The head
+  1. WARM-UP    – L_cls + L_proto (+ L_sep + L_struct). The head
                   and the prototypes must become meaningful before any
                   target signal is introduced; aligning to random
                   prototypes just injects noise. Ends as soon as held-out
@@ -322,6 +322,11 @@ def train_step(
             )
             per_src_proto.append(cls_loss(fgw_logits(d_bcm, cfg.tau), y))
     L_cls = torch.stack(per_src_losses).mean()
+    # Always computed, weighted by `cfg.lambda_vrex` (0 by default). The
+    # variance of the per-source risks turned out to be a much better
+    # *instability detector* than a loss: it is ~0 on healthy epochs and only
+    # spikes when one source's CE blows up, so it is kept in the log and out of
+    # the objective.
     L_vrex = vrex_loss(torch.stack(per_src_losses))
     L_proto = (
         torch.stack(per_src_proto).mean() if per_src_proto
@@ -363,12 +368,9 @@ def train_step(
     # ---------------------------------------------------- prototype regularisers
     L_sep = L_struct = zero
     if proto_w > 0:
-        L_sep = separation_loss(
-            Fp, Cp, q,
-            alpha=cfg.fgw_alpha, epsilon=cfg.fgw_epsilon, max_iter=cfg.fgw_max_iter,
-            margin=cfg.sep_margin, pairwise_fn=pairwise_fgw_distances,
-            intra_margin=cfg.sep_intra_margin,
-        )
+        # Cosine repulsion on the prototype embeddings: bounded, satisfiable at
+        # 0, and no FGW solve (see `separation_loss`).
+        L_sep = separation_loss(model.prototypes.embeddings())
         L_struct = struct_l1_loss(model.prototypes.soft_adjacency())
 
     loss = (
@@ -384,6 +386,14 @@ def train_step(
 
     optimizer.zero_grad()
     loss.backward()
+    # The FGW path is quadratic in the embeddings and passes through a
+    # logsumexp, so a single unlucky step (two ego-graphs landing on top of a
+    # prototype, say) can produce a gradient orders of magnitude above the
+    # norm — which is how the runs used to detonate every couple of hundred
+    # epochs and then spend dozens recovering. Clipping bounds the damage.
+    clip = float(getattr(cfg, "grad_clip", 1.0))
+    if clip > 0:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
     optimizer.step()
 
     return {

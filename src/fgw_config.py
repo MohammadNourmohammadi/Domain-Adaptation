@@ -93,12 +93,21 @@ class FGWConfig:
                                   # class-meaningful so alignment has anchors)
     lambda_align: float = 1.0
     lambda_ent: float = 0.5
-    lambda_sep: float = 1.0
+    lambda_sep: float = 1.0       # cosine repulsion between class prototypes
     lambda_pl: float = 0.1
-    lambda_vrex: float = 1.0
+    # V-REx off by default. The variance of the per-source risks is ~0 whenever
+    # training is healthy and only spikes on a blow-up, so as a loss it adds
+    # nothing and as a *diagnostic* it is genuinely useful — L_vrex is still
+    # computed and logged every epoch (see fgw_train.train_step), just not
+    # optimised. Set > 0 to put it back in the objective.
+    lambda_vrex: float = 0.0
     lambda_struct: float = 1e-3
+    # Deprecated, ignored: both belonged to the FGW-distance hinge that
+    # `separation_loss` replaced (the inter-class margin was unsatisfiable and
+    # the intra-class one fought the M-way soft-min). Kept as fields so existing
+    # configs and CLI wrappers keep loading.
     sep_margin: float = 1.0
-    sep_intra_margin: float = 0.5  # bounded within-class diversity target
+    sep_intra_margin: float = 0.5
     pl_threshold: float = 0.8
     target_class_prior: Optional[Tuple[float, float]] = None
 
@@ -106,6 +115,13 @@ class FGWConfig:
     lr: float = 1e-3
     weight_decay: float = 5e-3
     epochs: int = 100
+
+    # Global gradient-norm clip applied on every step. The FGW feature cost is
+    # quadratic in the embeddings and feeds a logsumexp, so occasional huge
+    # gradients reach the shared encoder through L_proto; unclipped runs showed
+    # periodic blow-ups (confidently-wrong CE ~2.3 followed by dozens of epochs
+    # of recovery). 0 disables clipping.
+    grad_clip: float = 1.0
 
     # Phase lengths are *absolute epoch counts*, not fractions of `epochs`.
     # Fractions coupled the schedule to the budget the wrong way round: with

@@ -81,9 +81,13 @@ def parse_args() -> FGWConfig:
     parser.add_argument("--lambda_ent", type=float, default=0.5)
     parser.add_argument("--lambda_sep", type=float, default=1.0)
     parser.add_argument("--lambda_pl", type=float, default=0.1)
-    parser.add_argument("--lambda_vrex", type=float, default=1.0)
+    parser.add_argument("--lambda_vrex", type=float, default=0.0,
+                        help="V-REx weight; 0 keeps it as a log-only "
+                             "instability diagnostic (the default)")
     parser.add_argument("--lambda_struct", type=float, default=1e-3)
-    parser.add_argument("--sep_intra_margin", type=float, default=0.5)
+    parser.add_argument("--sep_intra_margin", type=float, default=0.5,
+                        help="(deprecated, ignored) belonged to the old "
+                             "FGW-distance separation hinge")
     parser.add_argument("--pl_threshold", type=float, default=0.8)
     parser.add_argument("--nodes_per_step", type=int, default=128)
     parser.add_argument("--warmup_epochs", type=int, default=60,
@@ -97,6 +101,8 @@ def parse_args() -> FGWConfig:
                              "warm-up (the best warm-up checkpoint is restored "
                              "before adaptation starts)")
     parser.add_argument("--ramp_epochs", type=int, default=20)
+    parser.add_argument("--grad_clip", type=float, default=1.0,
+                        help="global gradient-norm clip (0 disables)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--directed", action="store_true",
                         help="keep citation edges directed (default: symmetrise)")
@@ -137,6 +143,7 @@ def parse_args() -> FGWConfig:
         epochs=args.epochs,
         lr=args.lr,
         weight_decay=args.weight_decay,
+        grad_clip=args.grad_clip,
         proj_dim=args.proj_dim,
         hidden_dim=args.hidden_dim,
         svd_proj=not args.no_svd_proj,

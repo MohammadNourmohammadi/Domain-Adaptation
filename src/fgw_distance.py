@@ -97,7 +97,10 @@ def pairwise_fgw_distances(
     # O(1) like the [0,1] structure term. Without it the feature half scales
     # with the embedding dimension (~D) and dominates the FGW cost regardless
     # of `alpha`, blowing up the distances (and the alignment loss with them).
-    Mf = torch.cdist(Fe_b, Fp_b) ** 2 / D              # (P, k, n_p)
+    # The clamp is for the gradient, not the value: d/dx sqrt(x) is infinite at
+    # x = 0, so `cdist(...) ** 2` produces a NaN gradient for any exactly
+    # coincident feature pair (which happens as soon as two embeddings collapse).
+    Mf = torch.cdist(Fe_b, Fp_b).clamp_min(1e-6) ** 2 / D   # (P, k, n_p)
 
     # square-loss GW constants (Peyre 2016): h1(a)=a, h2(b)=2b, f(x)=x^2
     a = torch.bmm(C1 ** 2, p_marg.unsqueeze(-1)).squeeze(-1)   # (P, k)
