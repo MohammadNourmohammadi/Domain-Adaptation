@@ -62,6 +62,25 @@ def compute_metrics(logits: torch.Tensor, labels: torch.Tensor) -> dict:
     return metrics
 
 
+@torch.no_grad()
+def majority_baseline(labels: torch.Tensor, num_classes: int) -> dict:
+    """Scores of always predicting the most frequent class.
+
+    Worth printing next to any result on an imbalanced target. Twitch RU is
+    24.5% positive, so this no-skill rule scores ACC 0.755 — higher than every
+    accuracy SelMAG's Table 1 reports on Twitch — while macro-F1 is only 0.430.
+    Without the row, an accuracy column on this dataset is uninterpretable.
+    """
+    y = labels.cpu()
+    counts = torch.bincount(y, minlength=num_classes)
+    pred = torch.full_like(y, int(counts.argmax()))
+    logits = torch.zeros(y.numel(), num_classes)
+    logits[torch.arange(y.numel()), pred] = 1.0
+    m = compute_metrics(logits, y)
+    m["auc"] = 0.5          # a constant score has no ranking information
+    return m
+
+
 def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)

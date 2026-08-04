@@ -15,6 +15,11 @@ class FGWConfig:
     data_root: str = "data"
     source_domains: List[str] = field(default_factory=lambda: ["DE", "FR"])
     target_domain: str = "ENGB"
+    # Twitch feature set. "musae" is the authors' 3170-d bag-of-words (the
+    # only one still obtainable); "pyg" the 128-d release SelMAG used, whose
+    # host is gone. Same six graphs either way. Ignored by the Citation / Yelp
+    # runners, which set `feature_dim` directly.
+    features: str = "musae"
     feature_dim: int = 3170
 
     # Supervision budget: the fraction of *source* nodes whose labels are revealed
@@ -66,7 +71,13 @@ class FGWConfig:
     no_da: bool = False           # diagnostic: encoder+head on sources only
 
     # -------------------------------------------------------------- ego graph
-    ego_size: int = 32            # k = center + (k-1) PPR neighbours
+    # k = 12, not 32. Twitch graphs average 16-34 undirected neighbours per
+    # node, so a 32-node PPR neighbourhood has diameter 2 and its
+    # diameter-normalised shortest-path matrix collapses into {0, 1/3, 2/3}
+    # with almost no spread: the structural half of the FGW cost becomes a
+    # near-constant and the solver is paying to compute a plain Wasserstein
+    # distance. A smaller ego-graph keeps real topological variation.
+    ego_size: int = 12            # k = center + (k-1) PPR neighbours
     ppr_alpha: float = 0.15       # restart probability
     ppr_iters: int = 20           # power-iteration steps
     anchor_weight: float = 1.0    # w on the anchor indicator coordinate
@@ -75,7 +86,13 @@ class FGWConfig:
     # --------------------------------------------------------- prototype bank
     num_classes: int = 2
     num_protos: int = 3           # M prototype graphs per class
-    proto_size: int = 32          # n_p nodes per prototype
+    # n_p = 8, not 32. With 32 free prototype nodes the marginal constraints
+    # keep the entropic plan diffuse, so the FGW value tends to
+    # `const - 2<F_e, mean(F_p)>`; the mean of 32 near-random LayerNorm'd
+    # vectors is ~0 for every class, which is how d_0(v) and d_1(v) ended up
+    # identical for every ego-graph (L_proto pinned at ln 2 for 350 epochs).
+    # Fewer nodes force each prototype to commit to a specific local pattern.
+    proto_size: int = 8           # n_p nodes per prototype
     adjacency_temp: float = 1.0   # temperature on the soft-adjacency sigmoid
     embed_init_scale: float = 1.0  # std of prototype embedding init
 
@@ -83,7 +100,9 @@ class FGWConfig:
     fgw_alpha: float = 0.25       # trade-off between feature and structure
                                   # (low: structure ~uninformative on dense graphs)
     fgw_epsilon: Optional[float] = 0.05  # entropic Sinkhorn FGW regularisation
-    fgw_max_iter: int = 50        # outer block-coordinate (FGW) iterations
+    # Outer block-coordinate iterations. The solver exits early once the plan
+    # stops moving, so this is a cap rather than a fixed cost.
+    fgw_max_iter: int = 20
 
     # -------------------------------------------------- classifier soft-min
     tau: float = 0.5              # temperature
@@ -95,13 +114,33 @@ class FGWConfig:
     lambda_ent: float = 0.5
     lambda_sep: float = 1.0       # cosine repulsion between class prototypes
     lambda_pl: float = 0.1
+
+    # Hinge on the source-conditional FGW distances. Cross-entropy alone has a
+    # vanishing gradient exactly at d_0 = d_1, which is where the runs got
+    # stuck; the hinge pushes with constant force until the correct class is
+    # `fgw_margin` closer than the nearest wrong one. This is the term that
+    # makes the FGW branch class-discriminative at all.
+    lambda_fgw_margin: float = 0.5
+    fgw_margin: float = 0.5
+
+    # Weight on the class-balance half of the IM objective (the KL between the
+    # mean target prediction and the assumed prior). Never set this to 0
+    # without knowing why: pure conditional-entropy minimisation is optimised
+    # by predicting one class everywhere.
+    im_balance_weight: float = 1.0
     # V-REx off by default. The variance of the per-source risks is ~0 whenever
     # training is healthy and only spikes on a blow-up, so as a loss it adds
     # nothing and as a *diagnostic* it is genuinely useful — L_vrex is still
     # computed and logged every epoch (see fgw_train.train_step), just not
     # optimised. Set > 0 to put it back in the objective.
     lambda_vrex: float = 0.0
-    lambda_struct: float = 1e-3
+    # Penalty pulling each prototype's edge density towards `struct_density`.
+    # The old form was plain L1 on the soft adjacency, which drove A -> 0 and
+    # therefore C_p = 1 - A -> all-ones: a constant matrix with no structural
+    # information. `struct_density=None` calibrates the target from the data
+    # so that mean(C_p) matches mean(C_ego).
+    lambda_struct: float = 1e-2
+    struct_density: Optional[float] = None
     # Deprecated, ignored: both belonged to the FGW-distance hinge that
     # `separation_loss` replaced (the inter-class margin was unsatisfiable and
     # the intra-class one fought the M-way soft-min). Kept as fields so existing
@@ -109,11 +148,74 @@ class FGWConfig:
     sep_margin: float = 1.0
     sep_intra_margin: float = 0.5
     pl_threshold: float = 0.8
-    target_class_prior: Optional[Tuple[float, float]] = None
+
+    # ------------------------------------------------------------ label shift
+    # Known target class prior, used by the IM balance term (and, if enabled,
+    # the inference-time correction). When None the pooled *source* prior is
+    # used, unless `estimate_prior` turns on BBSE.
+    target_class_prior: Optional[Tuple[float, ...]] = None
+    # BBSE is **off by default**. It assumes p(x | y) is domain-invariant, i.e.
+    # that the domains differ by label shift alone. Twitch does not satisfy
+    # that — the graphs differ in structure and feature distribution too — and
+    # no source-side diagnostic can detect the violation, because the confusion
+    # matrix BBSE inverts is measured entirely on source data. On Twitch it
+    # confidently returned [0.844, 0.156] against a truth of [0.755, 0.245],
+    # over-stating the majority class, and feeding that to the balance term
+    # pushed the model toward the collapse the term exists to prevent.
+    #
+    # The source prior is the safer default: the balance term's job is to make
+    # collapse unprofitable, which it does for any non-degenerate prior, and
+    # erring toward the *minority* is the direction that helps macro-F1. Turn
+    # BBSE on where label shift really is the dominant shift.
+    estimate_prior: bool = False
+    # Largest cond(P(pred|y)) at which the BBSE estimate is trusted; above it
+    # the pooled source prior is used instead. See `estimate_target_prior`.
+    bbse_max_cond: float = 4.0
+    # Re-base the logits onto the target prior before argmax at evaluation.
+    #
+    # **Off by default, deliberately.** The correction is the Bayes-optimal rule
+    # for 0-1 loss under label shift, but 0-1 loss on a graph that is 24.5%
+    # positive is maximised by predicting the majority class — so the rule
+    # optimises straight towards the degenerate solution. Measured on Twitch at
+    # a fixed checkpoint: raw argmax ACC 0.638 / MacroF 0.544, corrected ACC
+    # 0.751 / MacroF 0.434. It spent 11 points of the headline metric to buy 11
+    # points of accuracy, and still landed below the 0.755 majority baseline it
+    # was chasing. Macro-F1 is maximised at a quite different threshold.
+    #
+    # Left switchable because it is a legitimate ablation and the right choice
+    # when accuracy is the target metric and the shift estimate is trustworthy.
+    prior_correct_eval: bool = False
+
+    # ------------------------------------------------- source selection (ours)
+    # FGW-native replacement for SelMAG's meta-learned selector: per-domain
+    # (s_global) and per-node (s_local) transferability read straight off the
+    # ego-graph FGW geometry. See `fgw_select.transferability`.
+    use_selection: bool = True
+    select_every: int = 20        # refresh period, in epochs
+    select_target_nodes: int = 32  # target ego-graphs sampled for the estimate
+    select_temp_global: float = 0.1
+    select_temp_local: float = 0.25
+    select_clip: float = 5.0      # max up/down-weighting factor
+    select_chunk: int = 256       # source egos per FGW batch
+
+    # ----------------------------------------------------------- prediction
+    # "head": the MLP head alone (default). "fgw": the prototype distances
+    # alone. "ensemble": mean of the two log-probability vectors. The FGW paths
+    # need an ego-graph + FGW solve for every scored node, so they cost far
+    # more at evaluation; only worth enabling once L_proto is well below ln C.
+    predict: str = "head"
 
     # ---------------------------------------------------- training schedule
     lr: float = 1e-3
     weight_decay: float = 5e-3
+    # Weight decay for the prototype bank, which gets its own parameter group.
+    # It must be 0. `PrototypeBank.embeddings()` LayerNorms Z, so the forward
+    # pass is invariant to |Z| and decay shrinks the parameter without changing
+    # any output — which silently inflates the effective angular step size over
+    # training. On `E_logits` it is worse than useless: decay drives the logits
+    # to 0, hence sigmoid -> 0.5, hence C_p -> a constant 0.5 matrix, erasing
+    # the prototype structure the FGW distance is supposed to read.
+    proto_weight_decay: float = 0.0
     epochs: int = 100
 
     # Global gradient-norm clip applied on every step. The FGW feature cost is
@@ -130,18 +232,33 @@ class FGWConfig:
     # any target signal arrived (and both runs then selected the same
     # checkpoint). The encoder saturates in a few dozen epochs regardless of
     # how long the run is, so the switch has to be pinned to that scale.
-    warmup_epochs: int = 60       # hard cap on warm-up (L_cls + L_proto only)
+    warmup_epochs: int = 150      # hard cap on warm-up (L_cls + L_proto only)
     adapt_epochs: int = 120       # epochs of ramped align/IM before refine
     ramp_epochs: int = 20         # sigmoid ramp on align/ent weights
 
     # Warm-up normally ends *before* `warmup_epochs` on a held-out-source-F1
-    # plateau: no improvement over the running best for `warmup_patience`
-    # consecutive epochs. The best warm-up checkpoint is then restored before
-    # adaptation starts — adapting from an already-overfit encoder leaves
-    # nothing worth preserving. Needs `source_val_frac > 0`; without it the
-    # switch falls back to the fixed `warmup_epochs` cap.
-    warmup_patience: int = 15
+    # plateau. Three guards, all of which the previous version lacked and all
+    # of which it tripped over on Twitch (it switched at epoch 29 having
+    # rewound to a checkpoint scoring src_val 0.5413, while the very same model
+    # went on to reach 0.6347 later in the run):
+    #
+    #  * `warmup_val_ema` smooths the plateau signal. Held-out macro-F1 over a
+    #    few hundred pooled validation nodes is very noisy epoch to epoch, and
+    #    the raw curve produced 15 consecutive "no gain" epochs during an
+    #    ordinary dip.
+    #  * `warmup_min_epochs` arms the patience counter only after the model has
+    #    had a real chance to fit.
+    #  * `warmup_proto_gate` additionally requires the FGW branch to have
+    #    become class-discriminative — L_proto below `gate * ln(C)` — before
+    #    the target terms come on. Alignment pulls the target toward the
+    #    prototypes, so switching while L_proto is still at chance means
+    #    aligning to noise. Set to 0 to disable the gate (the hard
+    #    `warmup_epochs` cap always wins in the end either way).
+    warmup_patience: int = 40
+    warmup_min_epochs: int = 40
     warmup_min_delta: float = 1e-4  # F1 gain that counts as an improvement
+    warmup_val_ema: float = 0.7     # EMA momentum on the plateau signal
+    warmup_proto_gate: float = 0.9
 
     # ----------------------------------------------- mini-batching over nodes
     nodes_per_step: int = 128

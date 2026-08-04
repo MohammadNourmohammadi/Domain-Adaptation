@@ -20,6 +20,7 @@ Usage:
 """
 
 import argparse
+import statistics
 
 import torch
 
@@ -30,10 +31,11 @@ from src.yelp_loader import (
     YELP_TARGET_CITY,
     load_sources_target,
 )
+from src.fgw_cli import add_method_args, method_kwargs, pick_device, seed_list
 from src.fgw_config import FGWConfig
 from src.fgw_model import FGWPrototypeDA
 from src.fgw_train import evaluate, run_training
-from src.utils import set_seed
+from src.utils import majority_baseline, set_seed
 
 
 def parse_args() -> FGWConfig:
@@ -56,79 +58,17 @@ def parse_args() -> FGWConfig:
     parser.add_argument("--gdrive_id", type=str, default=None,
                         help="Google-Drive file id of the Yelp .tgz to download "
                              "(default: the built-in old-round SelMAG dump)")
-    parser.add_argument("--source_label_ratio", type=float, default=0.1,
-                        help="fraction of source nodes whose labels are revealed "
-                             "to the supervised loss (supervision budget); the "
-                             "rest stay in the graph but their labels are hidden. "
-                             "Default 0.1 matches the SelMAG 10%%-labeled setting; "
-                             "use 1.0 for all source labels")
-    parser.add_argument("--source_label_stratified", action="store_true",
-                        help="draw the labeled subset per-class (stratified) "
-                             "instead of a pure random draw over all nodes")
-    parser.add_argument("--source_val_frac", type=float, default=0.2,
-                        help="fraction of the revealed source labels held out "
-                             "of the loss and used for model selection")
-    parser.add_argument("--model_selection", type=str, default="src_val",
-                        choices=["src_val", "snd", "entropy", "last"],
-                        help="checkpoint criterion (target labels are never used)")
     parser.add_argument("--min_common_reviewers", type=int, default=1,
-                        help="min shared reviewers for a co-review edge")
+                        help="POIs are linked when at least this many reviewers "
+                             "are shared")
     parser.add_argument("--max_user_degree", type=int, default=100,
-                        help="skip users reviewing more than this many POIs in a "
-                             "city (bounds the co-review pair blow-up)")
-    parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--weight_decay", type=float, default=5e-3)
-    parser.add_argument("--proj_dim", type=int, default=128)
-    parser.add_argument("--hidden_dim", type=int, default=64)
-    parser.add_argument("--no_svd_proj", action="store_true",
-                        help="learn the input projection instead of freezing it "
-                             "to the unsupervised SVD basis (the learned layer "
-                             "is >90%% of the parameters and overfits the small "
-                             "label budget within a few dozen epochs)")
-    parser.add_argument("--ego_size", type=int, default=32)
-    parser.add_argument("--proto_size", type=int, default=32)
-    parser.add_argument("--num_protos", type=int, default=3)
-    parser.add_argument("--head_hidden", type=int, default=None,
-                        help="MLP head width (defaults to hidden_dim)")
-    parser.add_argument("--head_dropout", type=float, default=0.5)
-    parser.add_argument("--no_layernorm", action="store_true",
-                        help="disable LayerNorm on the encoder output")
-    parser.add_argument("--no_da", action="store_true",
-                        help="diagnostic: encoder+head on sources only (no DA)")
-    parser.add_argument("--fgw_alpha", type=float, default=0.5)
-    parser.add_argument("--fgw_epsilon", type=float, default=0.05)
-    parser.add_argument("--tau", type=float, default=0.5)
-    parser.add_argument("--lambda_proto", type=float, default=0.3)
-    parser.add_argument("--lambda_align", type=float, default=1.0)
-    parser.add_argument("--lambda_ent", type=float, default=0.5)
-    parser.add_argument("--lambda_sep", type=float, default=1.0)
-    parser.add_argument("--lambda_pl", type=float, default=0.1)
-    parser.add_argument("--lambda_vrex", type=float, default=0.0,
-                        help="V-REx weight; 0 keeps it as a log-only "
-                             "instability diagnostic (the default)")
-    parser.add_argument("--lambda_struct", type=float, default=1e-3)
-    parser.add_argument("--sep_intra_margin", type=float, default=0.5,
-                        help="(deprecated, ignored) belonged to the old "
-                             "FGW-distance separation hinge")
-    parser.add_argument("--pl_threshold", type=float, default=0.8)
-    parser.add_argument("--nodes_per_step", type=int, default=128)
-    parser.add_argument("--warmup_epochs", type=int, default=60,
-                        help="hard cap on the warm-up phase, in absolute epochs "
-                             "(it normally ends earlier, on a held-out source "
-                             "F1 plateau)")
-    parser.add_argument("--adapt_epochs", type=int, default=120,
-                        help="absolute number of adapt epochs before refine")
-    parser.add_argument("--warmup_patience", type=int, default=15,
-                        help="epochs without a held-out source F1 gain that end "
-                             "warm-up (the best warm-up checkpoint is restored "
-                             "before adaptation starts)")
-    parser.add_argument("--ramp_epochs", type=int, default=20)
-    parser.add_argument("--grad_clip", type=float, default=1.0,
-                        help="global gradient-norm clip (0 disables)")
-    parser.add_argument("--seed", type=int, default=42)
+                        help="drop reviewers above this POI count before "
+                             "building co-review edges")
     parser.add_argument("--directed", action="store_true",
                         help="keep co-review edges directed (default: symmetrise)")
+    # Yelp is 6-class with dense 300-d GLOVE features; everything below is the
+    # shared method surface (see src/fgw_cli.py).
+    add_method_args(parser, hidden_dim=64, fgw_alpha=0.5, ego_size=16)
     args = parser.parse_args()
 
     # "Every source except one": default sources = all cities but the target.
@@ -144,59 +84,14 @@ def parse_args() -> FGWConfig:
             f"target '{args.target}' must not also be a source: {args.sources}"
         )
 
-    if torch.cuda.is_available():
-        device = "cuda"
-    elif torch.backends.mps.is_available():
-        device = "mps"
-    else:
-        device = "cpu"
-
-    head_hidden = args.head_hidden if args.head_hidden is not None else args.hidden_dim
-
     cfg = FGWConfig(
         data_root=args.data_root,
         source_domains=args.sources,
         target_domain=args.target,
         feature_dim=YELP_FEATURE_DIM,
         num_classes=YELP_NUM_CLASSES,
-        source_label_ratio=args.source_label_ratio,
-        source_label_stratified=args.source_label_stratified,
-        source_val_frac=args.source_val_frac,
-        model_selection=args.model_selection,
-        epochs=args.epochs,
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-        grad_clip=args.grad_clip,
-        proj_dim=args.proj_dim,
-        hidden_dim=args.hidden_dim,
-        svd_proj=not args.no_svd_proj,
-        use_layernorm=not args.no_layernorm,
-        head_hidden=head_hidden,
-        head_dropout=args.head_dropout,
-        no_da=args.no_da,
-        ego_size=args.ego_size,
-        proto_size=args.proto_size,
-        num_protos=args.num_protos,
-        fgw_alpha=args.fgw_alpha,
-        fgw_epsilon=args.fgw_epsilon,
-        tau=args.tau,
-        lambda_proto=args.lambda_proto,
-        lambda_align=args.lambda_align,
-        lambda_ent=args.lambda_ent,
-        lambda_sep=args.lambda_sep,
-        lambda_pl=args.lambda_pl,
-        lambda_vrex=args.lambda_vrex,
-        lambda_struct=args.lambda_struct,
-        sep_intra_margin=args.sep_intra_margin,
-        pl_threshold=args.pl_threshold,
-        target_class_prior=None,
-        nodes_per_step=args.nodes_per_step,
-        warmup_epochs=args.warmup_epochs,
-        adapt_epochs=args.adapt_epochs,
-        warmup_patience=args.warmup_patience,
-        ramp_epochs=args.ramp_epochs,
-        seed=args.seed,
-        device=device,
+        device=pick_device(),
+        **method_kwargs(args),
     )
     cfg.symmetrize = not args.directed
     cfg.glove_path = args.glove_path
@@ -205,7 +100,7 @@ def parse_args() -> FGWConfig:
     cfg.auto_download = not args.no_download
     cfg.gdrive_id = args.gdrive_id
     cfg.glove_url = args.glove_url
-    return cfg
+    return cfg, seed_list(args)
 
 
 def _label_hist(y: torch.Tensor, num_classes: int) -> str:
@@ -213,8 +108,48 @@ def _label_hist(y: torch.Tensor, num_classes: int) -> str:
     return " ".join(f"{c}:{n}" for c, n in enumerate(counts))
 
 
+def run_once(cfg: FGWConfig, sources, target, seed: int) -> dict:
+    set_seed(seed)
+    model = FGWPrototypeDA(
+        in_dim=cfg.feature_dim,
+        proj_dim=cfg.proj_dim,
+        hidden_dim=cfg.hidden_dim,
+        num_classes=cfg.num_classes,
+        num_protos=cfg.num_protos,
+        proto_size=cfg.proto_size,
+        anchor_weight=cfg.anchor_weight,
+        adjacency_temp=cfg.adjacency_temp,
+        head_hidden=cfg.head_hidden,
+        head_dropout=cfg.head_dropout,
+        use_layernorm=cfg.use_layernorm,
+        embed_init_scale=cfg.embed_init_scale,
+        frozen_proj=cfg.svd_proj,
+    )
+    print(f"\nModel parameters: {sum(p.numel() for p in model.parameters()):,}")
+    print("\nTraining ...\n")
+    model, ctx = run_training(model, sources, target, cfg)
+
+    dev_sources = [s.to(cfg.device) for s in sources]
+    dev_target = target.to(cfg.device)
+
+    print("\n" + "-" * 60)
+    print(f"  Seed {seed} results")
+    print("-" * 60)
+    for name, g, cache in zip(cfg.source_domains, dev_sources, ctx["src_caches"]):
+        st = evaluate(model, g, cfg=cfg, cache=cache)
+        print(f"  Source {name:>10}: ACC {st['acc']:.4f}  "
+              f"AUROC {st['auc']:.4f}  MacroF {st['f1']:.4f}")
+    tgt = evaluate(
+        model, dev_target, cfg=cfg, cache=ctx["tgt_cache"],
+        source_prior=ctx["src_prior"], target_prior=ctx["tgt_prior"],
+    )
+    print(f"  Target {cfg.target_domain:>10}: ACC {tgt['acc']:.4f}  "
+          f"AUROC {tgt['auc']:.4f}  MacroF {tgt['f1']:.4f}")
+    return tgt
+
+
 def main():
-    cfg = parse_args()
+    cfg, seeds = parse_args()
     set_seed(cfg.seed)
 
     print("=" * 60)
@@ -269,40 +204,22 @@ def main():
           f"{target.edge_index.size(1)} edges, "
           f"labels [{_label_hist(target.y, cfg.num_classes)}]")
 
-    model = FGWPrototypeDA(
-        in_dim=cfg.feature_dim,
-        proj_dim=cfg.proj_dim,
-        hidden_dim=cfg.hidden_dim,
-        num_classes=cfg.num_classes,
-        num_protos=cfg.num_protos,
-        proto_size=cfg.proto_size,
-        anchor_weight=cfg.anchor_weight,
-        adjacency_temp=cfg.adjacency_temp,
-        head_hidden=cfg.head_hidden,
-        head_dropout=cfg.head_dropout,
-        use_layernorm=cfg.use_layernorm,
-        embed_init_scale=cfg.embed_init_scale,
-        frozen_proj=cfg.svd_proj,
-    )
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"\nModel parameters: {total_params:,}")
-
-    print("\nTraining ...\n")
-    model = run_training(model, sources, target, cfg)
-
-    sources = [s.to(cfg.device) for s in sources]
-    target = target.to(cfg.device)
+    runs = [run_once(cfg, sources, target, sd) for sd in seeds]
 
     print("\n" + "=" * 60)
-    print("  Final results")
+    print(f"  Final results — {cfg.target_domain}, {len(runs)} run(s)")
     print("=" * 60)
-    for name, g in zip(cfg.source_domains, sources):
-        s = evaluate(model, g)
-        print(f"  Source {name:>10}: ACC {s['acc']:.4f}  "
-              f"AUROC {s['auc']:.4f}  MacroF {s['f1']:.4f}")
-    tgt_stats = evaluate(model, target)
-    print(f"  Target {cfg.target_domain:>10}: ACC {tgt_stats['acc']:.4f}  "
-          f"AUROC {tgt_stats['auc']:.4f}  MacroF {tgt_stats['f1']:.4f}")
+    base = majority_baseline(target.y, cfg.num_classes)
+    print(f"  majority class : ACC {base['acc']:.4f}  AUROC {base['auc']:.4f}  "
+          f"MacroF {base['f1']:.4f}   (no-skill reference)")
+    for key, label in (("acc", "ACC"), ("auc", "AUROC"), ("f1", "MacroF")):
+        vals = [r[key] for r in runs]
+        if len(vals) > 1:
+            print(f"  {label:<14}: {statistics.mean(vals):.4f} "
+                  f"+- {statistics.stdev(vals):.4f}   "
+                  f"({', '.join(f'{v:.4f}' for v in vals)})")
+        else:
+            print(f"  {label:<14}: {vals[0]:.4f}")
     print("=" * 60)
 
 

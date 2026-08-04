@@ -32,6 +32,9 @@ _DEFAULT_EPSILON = 0.05
 # Inner Sinkhorn sweeps per outer FGW (block-coordinate) iteration.
 _SINKHORN_ITERS = 50
 
+# Max absolute change in the transport plan below which the outer loop stops.
+_PLAN_TOL = 1e-6
+
 
 def _log_sinkhorn(
     cost: torch.Tensor,   # (P, k, n)
@@ -97,10 +100,18 @@ def pairwise_fgw_distances(
     # O(1) like the [0,1] structure term. Without it the feature half scales
     # with the embedding dimension (~D) and dominates the FGW cost regardless
     # of `alpha`, blowing up the distances (and the alignment loss with them).
-    # The clamp is for the gradient, not the value: d/dx sqrt(x) is infinite at
-    # x = 0, so `cdist(...) ** 2` produces a NaN gradient for any exactly
-    # coincident feature pair (which happens as soon as two embeddings collapse).
-    Mf = torch.cdist(Fe_b, Fp_b).clamp_min(1e-6) ** 2 / D   # (P, k, n_p)
+    #
+    # Expanded as ||a||^2 + ||b||^2 - 2a.b rather than via `torch.cdist(...)**2`.
+    # cdist takes a square root that this then undoes, and d/dx sqrt(x) is
+    # infinite at 0, so the old form produced a NaN gradient for any exactly
+    # coincident feature pair and needed a clamp to paper over it. The
+    # expansion is smooth everywhere (gradient 0 at coincidence, which is
+    # correct), avoids the round trip, and has a backward implementation on
+    # every device — `aten::_cdist_backward` is missing on MPS.
+    Fe_sq = (Fe_b ** 2).sum(-1).unsqueeze(2)                # (P, k, 1)
+    Fp_sq = (Fp_b ** 2).sum(-1).unsqueeze(1)                # (P, 1, n_p)
+    Mf = (Fe_sq + Fp_sq - 2.0 * torch.bmm(Fe_b, Fp_b.transpose(1, 2)))
+    Mf = Mf.clamp_min(0.0) / D                              # (P, k, n_p)
 
     # square-loss GW constants (Peyre 2016): h1(a)=a, h2(b)=2b, f(x)=x^2
     a = torch.bmm(C1 ** 2, p_marg.unsqueeze(-1)).squeeze(-1)   # (P, k)
@@ -111,12 +122,21 @@ def pairwise_fgw_distances(
     log_q = (q_marg + 1e-30).log()
 
     # ----- block-coordinate descent: linearise GW at T, Sinkhorn, repeat
+    # The loop exits as soon as the plan stops moving. Running a fixed 50
+    # outer iterations x 50 Sinkhorn sweeps was 2,500 sweeps per call for a
+    # problem that converges in a handful; since this solver is invoked
+    # thousands of times per training step, the early exit is most of the
+    # method's wall-clock budget.
     with torch.no_grad():
         T = p_marg.unsqueeze(-1) * q_marg.unsqueeze(1)        # (P, k, n_p)
         for _ in range(max(1, max_iter)):
             tens = constC - 2.0 * torch.bmm(torch.bmm(C1, T), C2)
             cost = (1.0 - alpha) * Mf + 2.0 * alpha * tens
-            T = _log_sinkhorn(cost, log_p, log_q, eps, _SINKHORN_ITERS)
+            T_new = _log_sinkhorn(cost, log_p, log_q, eps, _SINKHORN_ITERS)
+            shift = (T_new - T).abs().amax()
+            T = T_new
+            if shift < _PLAN_TOL:
+                break
         T = T.detach()
 
     # ----- differentiable FGW value at the fixed plan (envelope theorem)

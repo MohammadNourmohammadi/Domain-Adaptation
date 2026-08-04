@@ -3,96 +3,51 @@
 A second runner sitting alongside `main.py`. The existing Causal-DANN
 pipeline is untouched; this script wires the new modules together.
 
+The default setting reproduces SelMAG's Twitch protocol (arXiv:2406.10425):
+the six language graphs, the five alphabetically first as sources, RU as
+target, 10% of source nodes labeled. Verify the data with
+`python scripts/download_twitch.py --check`.
+
+One caveat, documented in `src/data_loader.py`: the paper used a dense 128-d
+feature release whose host has since been suspended and whose domain no longer
+resolves, so it cannot be obtained by anyone. We train on the authors' own
+3170-d features, which the encoder's frozen unsupervised SVD basis reduces to
+--proj_dim (default 128) — the paper's stated width, on the paper's graphs.
+
 Usage:
-    python main_fgw.py                                       # DE,FR -> ENGB
-    python main_fgw.py --sources DE ES --target ENGB
-    python main_fgw.py --sources ENGB ES RU --target FR --epochs 200
+    python main_fgw.py                                       # DE..PTBR -> RU
+    python main_fgw.py --seeds 0 1 2 3 4                     # paper-style 5 runs
+    python main_fgw.py --features musae                      # raw 3170-d BoW
+    python main_fgw.py --no_da                               # source-only baseline
+    python main_fgw.py --sources DE ES --target ENGB --epochs 200
 """
 
 import argparse
+import statistics
 
-import torch
-
-from src.data_loader import GLOBAL_FEATURE_DIM, load_sources_target
+from src.data_loader import FEATURE_SETS, feature_dim, load_sources_target
+from src.fgw_cli import add_method_args, method_kwargs, pick_device, seed_list
 from src.fgw_config import FGWConfig
 from src.fgw_model import FGWPrototypeDA
 from src.fgw_train import evaluate, run_training
-from src.utils import set_seed
+from src.utils import majority_baseline, set_seed
 
 
-def parse_args() -> FGWConfig:
+def parse_args():
     parser = argparse.ArgumentParser(description="FGW-prototype DA on Twitch")
     parser.add_argument("--sources", type=str, nargs="+",
                         default=["DE", "ENGB", "ES", "FR", "PTBR"])
     parser.add_argument("--target", type=str, default="RU")
-    parser.add_argument("--source_label_ratio", type=float, default=0.1,
-                        help="fraction of source nodes whose labels are revealed "
-                             "to the supervised loss (supervision budget); the "
-                             "rest stay in the graph but their labels are hidden. "
-                             "Default 0.1 (10%% labeled); use 1.0 for all labels")
-    parser.add_argument("--source_label_stratified", action="store_true",
-                        help="draw the labeled subset per-class (stratified) "
-                             "instead of a pure random draw over all nodes")
-    parser.add_argument("--source_val_frac", type=float, default=0.2,
-                        help="fraction of the revealed source labels held out "
-                             "of the loss and used for model selection")
-    parser.add_argument("--model_selection", type=str, default="src_val",
-                        choices=["src_val", "snd", "entropy", "last"],
-                        help="checkpoint criterion (target labels are never used)")
-    parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--weight_decay", type=float, default=5e-3)
-    parser.add_argument("--proj_dim", type=int, default=128)
-    parser.add_argument("--hidden_dim", type=int, default=32)
-    parser.add_argument("--no_svd_proj", action="store_true",
-                        help="learn the input projection instead of freezing it "
-                             "to the unsupervised SVD basis (the learned layer "
-                             "is >90%% of the parameters and overfits the small "
-                             "label budget within a few dozen epochs)")
-    parser.add_argument("--ego_size", type=int, default=32)
-    parser.add_argument("--proto_size", type=int, default=32)
-    parser.add_argument("--num_protos", type=int, default=3)
-    parser.add_argument("--head_hidden", type=int, default=None,
-                        help="MLP head width (defaults to hidden_dim)")
-    parser.add_argument("--head_dropout", type=float, default=0.5)
-    parser.add_argument("--no_layernorm", action="store_true",
-                        help="disable LayerNorm on the encoder output")
-    parser.add_argument("--no_da", action="store_true",
-                        help="diagnostic: encoder+head on sources only (no DA)")
-    parser.add_argument("--fgw_alpha", type=float, default=0.25)
-    parser.add_argument("--fgw_epsilon", type=float, default=0.05)
-    parser.add_argument("--tau", type=float, default=0.5)
-    parser.add_argument("--lambda_proto", type=float, default=0.3)
-    parser.add_argument("--lambda_align", type=float, default=1.0)
-    parser.add_argument("--lambda_ent", type=float, default=0.5)
-    parser.add_argument("--lambda_sep", type=float, default=1.0)
-    parser.add_argument("--lambda_pl", type=float, default=0.1)
-    parser.add_argument("--lambda_vrex", type=float, default=0.0,
-                        help="V-REx weight; 0 keeps it as a log-only "
-                             "instability diagnostic (the default)")
-    parser.add_argument("--lambda_struct", type=float, default=1e-3)
-    parser.add_argument("--sep_intra_margin", type=float, default=0.5,
-                        help="(deprecated, ignored) belonged to the old "
-                             "FGW-distance separation hinge")
-    parser.add_argument("--pl_threshold", type=float, default=0.8)
-    parser.add_argument("--target_prior", type=float, nargs=2, default=None,
-                        metavar=("P0", "P1"),
-                        help="known target class prior, e.g. --target_prior 0.454 0.546")
-    parser.add_argument("--nodes_per_step", type=int, default=128)
-    parser.add_argument("--warmup_epochs", type=int, default=60,
-                        help="hard cap on the warm-up phase, in absolute epochs "
-                             "(it normally ends earlier, on a held-out source "
-                             "F1 plateau)")
-    parser.add_argument("--adapt_epochs", type=int, default=120,
-                        help="absolute number of adapt epochs before refine")
-    parser.add_argument("--warmup_patience", type=int, default=15,
-                        help="epochs without a held-out source F1 gain that end "
-                             "warm-up (the best warm-up checkpoint is restored "
-                             "before adaptation starts)")
-    parser.add_argument("--ramp_epochs", type=int, default=20)
-    parser.add_argument("--grad_clip", type=float, default=1.0,
-                        help="global gradient-norm clip (0 disables)")
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--features", type=str, default="musae",
+                        choices=FEATURE_SETS,
+                        help="'musae': the authors' 3170-d bag-of-words, the "
+                             "only release still obtainable (the encoder's "
+                             "frozen SVD basis reduces it to --proj_dim=128, "
+                             "the paper's stated width). 'pyg': the 128-d "
+                             "release SelMAG used, whose host no longer exists")
+    parser.add_argument("--pyg_root", type=str, default="data/twitch_pyg",
+                        help="where scripts/download_twitch_pyg.py put the npz files")
+    add_method_args(parser)
     args = parser.parse_args()
 
     if args.target in args.sources:
@@ -100,109 +55,63 @@ def parse_args() -> FGWConfig:
             f"target '{args.target}' must not also be a source: {args.sources}"
         )
 
-    if torch.cuda.is_available():
-        device = "cuda"
-    elif torch.backends.mps.is_available():
-        device = "mps"
-    else:
-        device = "cpu"
-
-    head_hidden = args.head_hidden if args.head_hidden is not None else args.hidden_dim
-    target_prior = tuple(args.target_prior) if args.target_prior is not None else None
-
-    return FGWConfig(
+    cfg = FGWConfig(
         source_domains=args.sources,
         target_domain=args.target,
-        source_label_ratio=args.source_label_ratio,
-        source_label_stratified=args.source_label_stratified,
-        source_val_frac=args.source_val_frac,
-        model_selection=args.model_selection,
-        epochs=args.epochs,
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-        grad_clip=args.grad_clip,
-        proj_dim=args.proj_dim,
-        hidden_dim=args.hidden_dim,
-        svd_proj=not args.no_svd_proj,
-        use_layernorm=not args.no_layernorm,
-        head_hidden=head_hidden,
-        head_dropout=args.head_dropout,
-        no_da=args.no_da,
-        ego_size=args.ego_size,
-        proto_size=args.proto_size,
-        num_protos=args.num_protos,
-        fgw_alpha=args.fgw_alpha,
-        fgw_epsilon=args.fgw_epsilon,
-        tau=args.tau,
-        lambda_proto=args.lambda_proto,
-        lambda_align=args.lambda_align,
-        lambda_ent=args.lambda_ent,
-        lambda_sep=args.lambda_sep,
-        lambda_pl=args.lambda_pl,
-        lambda_vrex=args.lambda_vrex,
-        lambda_struct=args.lambda_struct,
-        sep_intra_margin=args.sep_intra_margin,
-        pl_threshold=args.pl_threshold,
-        target_class_prior=target_prior,
-        nodes_per_step=args.nodes_per_step,
-        warmup_epochs=args.warmup_epochs,
-        adapt_epochs=args.adapt_epochs,
-        warmup_patience=args.warmup_patience,
-        ramp_epochs=args.ramp_epochs,
-        seed=args.seed,
-        device=device,
+        features=args.features,
+        feature_dim=feature_dim(args.features),
+        device=pick_device(),
+        **method_kwargs(args),
     )
+    return cfg, seed_list(args), args.pyg_root
 
 
-def main():
-    cfg = parse_args()
-    set_seed(cfg.seed)
-
+def print_header(cfg: FGWConfig, seeds) -> None:
     print("=" * 60)
     print("  FGW prototype-graph Domain Adaptation")
     print("=" * 60)
     print(f"  Sources       : {cfg.source_domains}")
     print(f"  Target        : {cfg.target_domain}")
+    print(f"  Features      : {cfg.features} ({cfg.feature_dim}-d)"
+          f"{'   <- SelMAG protocol' if cfg.features == 'pyg' else ''}")
     _draw = "stratified" if cfg.source_label_stratified else "random"
     print(f"  Source labels : {cfg.source_label_ratio:.0%} ({_draw} draw; "
           f"target 0%)")
     print(f"  Selection     : {cfg.model_selection} "
           f"({cfg.source_val_frac:.0%} of source labels held out)")
+    print(f"  Seeds         : {seeds}")
     print(f"  Device        : {cfg.device}")
     print(f"  proj/hidden   : {cfg.proj_dim} / {cfg.hidden_dim}"
           f"{'  (frozen SVD basis)' if cfg.svd_proj else '  (learned proj)'}")
-    print(f"  schedule      : warmup <= {cfg.warmup_epochs} (patience "
-          f"{cfg.warmup_patience}) -> adapt {cfg.adapt_epochs} -> refine, "
+    print(f"  schedule      : warmup <= {cfg.warmup_epochs} (armed at "
+          f"{cfg.warmup_min_epochs}, patience {cfg.warmup_patience}, proto gate "
+          f"{cfg.warmup_proto_gate}) -> adapt {cfg.adapt_epochs} -> refine, "
           f"of {cfg.epochs} epochs")
     print(f"  ego_size k    : {cfg.ego_size}")
     print(f"  proto_size n_p: {cfg.proto_size}  (M={cfg.num_protos} per class)")
     print(f"  fgw alpha,eps : {cfg.fgw_alpha}, {cfg.fgw_epsilon}")
-    print(f"  tau           : {cfg.tau}")
+    print(f"  tau / predict : {cfg.tau} / {cfg.predict}")
     print(f"  head/LN       : {cfg.head_hidden} / {cfg.use_layernorm}")
-    print(f"  mode          : {'source-only (no DA)' if cfg.no_da else 'FGW domain adaptation'}")
-    print(f"  lambda_proto  : {cfg.lambda_proto}")
-    print(f"  lambda_align  : {cfg.lambda_align}")
-    print(f"  lambda_ent    : {cfg.lambda_ent}")
-    print(f"  lambda_sep    : {cfg.lambda_sep}")
-    print(f"  lambda_pl     : {cfg.lambda_pl}")
-    print(f"  lambda_vrex   : {cfg.lambda_vrex}")
-    print(f"  lambda_struct : {cfg.lambda_struct}")
-    print(f"  target_prior  : {cfg.target_class_prior}")
+    print(f"  mode          : "
+          f"{'source-only (no DA)' if cfg.no_da else 'FGW domain adaptation'}")
+    print(f"  selection     : "
+          f"{'FGW s_global/s_local' if cfg.use_selection else 'off (uniform sources)'}")
+    print(f"  prior         : "
+          f"{'given ' + str(cfg.target_class_prior) if cfg.target_class_prior else ('BBSE estimate' if cfg.estimate_prior else 'source prior')}"
+          f"; eval correction {'on' if cfg.prior_correct_eval else 'off'}")
+    print(f"  lambdas       : proto {cfg.lambda_proto}  align {cfg.lambda_align}  "
+          f"ent {cfg.lambda_ent} (bal {cfg.im_balance_weight})  "
+          f"sep {cfg.lambda_sep}  pl {cfg.lambda_pl}")
+    print(f"                  fgw_margin {cfg.lambda_fgw_margin} "
+          f"(m={cfg.fgw_margin})  struct {cfg.lambda_struct}  "
+          f"vrex {cfg.lambda_vrex}")
     print("=" * 60)
 
-    print("\nLoading data ...")
-    sources, target = load_sources_target(
-        cfg.data_root, cfg.source_domains, cfg.target_domain,
-    )
-    for name, g in zip(cfg.source_domains, sources):
-        print(f"  {name}: {g.num_nodes} nodes, {g.edge_index.size(1)} edges, "
-              f"pos-rate {g.y.float().mean().item():.3f}")
-    print(f"  {cfg.target_domain} (target): {target.num_nodes} nodes, "
-          f"{target.edge_index.size(1)} edges, "
-          f"pos-rate {target.y.float().mean().item():.3f}")
 
+def run_once(cfg: FGWConfig, sources, target, seed: int) -> dict:
+    set_seed(seed)
     model = FGWPrototypeDA(
-        in_dim=GLOBAL_FEATURE_DIM,
+        in_dim=cfg.feature_dim,
         proj_dim=cfg.proj_dim,
         hidden_dim=cfg.hidden_dim,
         num_classes=cfg.num_classes,
@@ -216,27 +125,65 @@ def main():
         embed_init_scale=cfg.embed_init_scale,
         frozen_proj=cfg.svd_proj,
     )
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"\nModel parameters: {total_params:,}")
-
+    print(f"\nModel parameters: {sum(p.numel() for p in model.parameters()):,}")
     print("\nTraining ...\n")
-    model = run_training(model, sources, target, cfg)
+    model, ctx = run_training(model, sources, target, cfg)
 
-    sources = [s.to(cfg.device) for s in sources]
-    target = target.to(cfg.device)
+    dev_sources = [s.to(cfg.device) for s in sources]
+    dev_target = target.to(cfg.device)
 
-    # The parametric head predicts straight from the encoder embeddings, so
-    # evaluation no longer needs the ego-graph caches.
-    print("\n" + "=" * 60)
-    print("  Final results")
-    print("=" * 60)
-    for name, g in zip(cfg.source_domains, sources):
-        s = evaluate(model, g)
+    print("\n" + "-" * 60)
+    print(f"  Seed {seed} results")
+    print("-" * 60)
+    for name, g, cache in zip(cfg.source_domains, dev_sources, ctx["src_caches"]):
+        s = evaluate(model, g, cfg=cfg, cache=cache)
         print(f"  Source {name:>5}: ACC {s['acc']:.4f}  "
               f"AUROC {s['auc']:.4f}  MacroF {s['f1']:.4f}")
-    tgt_stats = evaluate(model, target)
-    print(f"  Target {cfg.target_domain:>5}: ACC {tgt_stats['acc']:.4f}  "
-          f"AUROC {tgt_stats['auc']:.4f}  MacroF {tgt_stats['f1']:.4f}")
+    tgt = evaluate(
+        model, dev_target, cfg=cfg, cache=ctx["tgt_cache"],
+        source_prior=ctx["src_prior"], target_prior=ctx["tgt_prior"],
+    )
+    print(f"  Target {cfg.target_domain:>5}: ACC {tgt['acc']:.4f}  "
+          f"AUROC {tgt['auc']:.4f}  MacroF {tgt['f1']:.4f}")
+    return tgt
+
+
+def main():
+    cfg, seeds, pyg_root = parse_args()
+    print_header(cfg, seeds)
+
+    print("\nLoading data ...")
+    sources, target = load_sources_target(
+        cfg.data_root, cfg.source_domains, cfg.target_domain,
+        features=cfg.features, pyg_root=pyg_root,
+    )
+    for name, g in zip(cfg.source_domains, sources):
+        print(f"  {name}: {g.num_nodes} nodes, {g.edge_index.size(1)} edges, "
+              f"pos-rate {g.y.float().mean().item():.3f}")
+    print(f"  {cfg.target_domain} (target): {target.num_nodes} nodes, "
+          f"{target.edge_index.size(1)} edges, "
+          f"pos-rate {target.y.float().mean().item():.3f}")
+
+    runs = [run_once(cfg, sources, target, s) for s in seeds]
+
+    print("\n" + "=" * 60)
+    print(f"  Final results — {cfg.target_domain}, {len(runs)} run(s)")
+    print("=" * 60)
+    # The majority-class row makes the accuracy column readable. On Twitch RU
+    # (24.5% positive) it scores ACC 0.755 / MacroF 0.430, which is *above*
+    # every accuracy SelMAG's Table 1 reports for this dataset — worth stating
+    # rather than leaving for a reviewer to work out.
+    base = majority_baseline(target.y, cfg.num_classes)
+    print(f"  majority class : ACC {base['acc']:.4f}  AUROC {base['auc']:.4f}  "
+          f"MacroF {base['f1']:.4f}   (no-skill reference)")
+    for key, label in (("acc", "ACC"), ("auc", "AUROC"), ("f1", "MacroF")):
+        vals = [r[key] for r in runs]
+        if len(vals) > 1:
+            print(f"  {label:<14}: {statistics.mean(vals):.4f} "
+                  f"+- {statistics.stdev(vals):.4f}   "
+                  f"({', '.join(f'{v:.4f}' for v in vals)})")
+        else:
+            print(f"  {label:<14}: {vals[0]:.4f}")
     print("=" * 60)
 
 

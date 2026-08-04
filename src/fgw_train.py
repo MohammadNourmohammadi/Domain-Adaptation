@@ -11,13 +11,14 @@ to the uniform ln-2 fixed point.
 Three phases, driven by `PhaseScheduler` (absolute epoch counts plus a
 validation-plateau trigger — *not* fractions of `cfg.epochs`):
 
-  1. WARM-UP    – L_cls + L_proto (+ L_sep + L_struct). The head
-                  and the prototypes must become meaningful before any
-                  target signal is introduced; aligning to random
-                  prototypes just injects noise. Ends as soon as held-out
-                  source macro-F1 plateaus (or at `cfg.warmup_epochs`),
-                  and the best warm-up checkpoint is restored before
-                  adaptation begins.
+  1. WARM-UP    – L_cls + L_proto + L_margin (+ L_sep + L_struct). The
+                  head and the prototypes must become meaningful before
+                  any target signal is introduced; aligning to random
+                  prototypes just injects noise. Ends on an EMA-smoothed
+                  held-out-source-F1 plateau — but only once L_proto has
+                  actually dropped below chance-level, because that
+                  precondition used to be stated and never checked. The
+                  best warm-up checkpoint is restored before adapting.
   2. ADAPT      – ramp lambda_align and lambda_ent from 0 to their full
                   values with the same sigmoid schedule used for GRL.
                   Lasts `cfg.adapt_epochs`.
@@ -32,10 +33,25 @@ Mini-batching is done over nodes, not graphs: every step encodes each
 full graph once (cheap) and then samples `cfg.nodes_per_step` seeds
 from each source / target to form FGW problems.
 
+Two label-free estimators steer the transfer, both in `fgw_select`:
+
+  * **Label shift.** The target prior is estimated by BBSE from the
+    held-out source split at the moment warm-up ends, then frozen. It
+    feeds the IM balance term (without which entropy minimisation is
+    optimised by predicting one class everywhere) and the inference-time
+    prior correction.
+  * **Source selection.** Per-domain and per-node transferability read
+    straight off the ego-graph FGW distances, replacing SelMAG's three
+    pretext tasks plus meta-learned selector. Refreshed every
+    `cfg.select_every` epochs once adaptation has begun.
+
 Model selection uses a held-out slice of the source label budget
 (`cfg.source_val_frac`) — never target labels. The end-of-run table also
 reports what the label-free criteria (SND, prediction entropy) would have
 picked and how far each lands from the target-oracle epoch.
+
+`run_training` returns `(model, ctx)`; `ctx` carries the priors and the
+ego caches so the caller can score the final model exactly as the loop did.
 """
 
 import math
@@ -52,21 +68,42 @@ from .fgw_ego import EgoGraphCache, build_ego_batch_from_cache
 from .fgw_encoder import svd_projection
 from .fgw_losses import (
     align_loss,
+    balance_scale,
     cls_loss,
+    fgw_margin_loss,
     im_loss,
     pseudo_label_loss,
     separation_loss,
-    struct_l1_loss,
+    struct_density_loss,
     vrex_loss,
 )
 from .fgw_model import FGWPrototypeDA
+from .fgw_select import (
+    class_prior,
+    estimate_target_prior,
+    mean_ego_structure,
+    prior_corrected_logits,
+    transferability,
+)
 from .utils import compute_metrics
 
 
 # ---------------------------------------------------------------------- schedule
+_RAMP_K = 5.0
+
+
 def _ramp(epoch: int, ramp_epochs: int) -> float:
+    """DANN-style sigmoid ramp, normalised to reach exactly 1.0 at the end.
+
+    The textbook `2/(1+exp(-10p)) - 1` is already at 0.987 by p = 0.5, so a
+    nominal 20-epoch ramp was really a 10-epoch one (the logs show w = 0.99 ten
+    epochs after the switch). Using a gentler exponent and dividing by its
+    endpoint keeps the sigmoid shape while making the configured length the
+    length you actually get.
+    """
     p = min(epoch / max(ramp_epochs, 1), 1.0)
-    return 2.0 / (1.0 + math.exp(-10.0 * p)) - 1.0
+    end = 2.0 / (1.0 + math.exp(-_RAMP_K)) - 1.0
+    return (2.0 / (1.0 + math.exp(-_RAMP_K * p)) - 1.0) / end
 
 
 class PhaseScheduler:
@@ -89,11 +126,17 @@ class PhaseScheduler:
     there is no honest signal to pick a checkpoint by).
     """
 
-    def __init__(self, cfg: FGWConfig, plateau: bool):
-        self.warmup_epochs = max(int(getattr(cfg, "warmup_epochs", 60)), 1)
+    def __init__(self, cfg: FGWConfig, plateau: bool, proto_chance: float = 0.0):
+        self.warmup_epochs = max(int(getattr(cfg, "warmup_epochs", 150)), 1)
         self.adapt_epochs = max(int(getattr(cfg, "adapt_epochs", 120)), 1)
-        self.patience = max(int(getattr(cfg, "warmup_patience", 15)), 1)
+        self.patience = max(int(getattr(cfg, "warmup_patience", 40)), 1)
+        self.min_epochs = max(int(getattr(cfg, "warmup_min_epochs", 40)), 0)
         self.min_delta = float(getattr(cfg, "warmup_min_delta", 1e-4))
+        self.ema_m = float(getattr(cfg, "warmup_val_ema", 0.7))
+        # L_proto has to fall below this before the target terms are allowed
+        # on; `proto_chance` is ln(num_classes), the value of a coin flip.
+        gate = float(getattr(cfg, "warmup_proto_gate", 0.9))
+        self.proto_ceiling = gate * proto_chance if gate > 0 else None
         self.plateau = plateau
 
         self.phase = "warmup"
@@ -102,6 +145,9 @@ class PhaseScheduler:
         self.best_epoch = None
         self.stale = 0
         self._best_state = None
+        self._ema = None
+        self.proto_ok = self.proto_ceiling is None
+        self.last_proto = float("nan")
 
     def ramp_position(self, epoch: int) -> int:
         """Epochs elapsed since adaptation began (0 on the first adapt epoch).
@@ -117,33 +163,60 @@ class PhaseScheduler:
         """Whether this epoch's plateau test requires a validation pass."""
         return self.plateau and self.phase == "warmup"
 
-    def step(self, epoch: int, model, val_f1: float = None) -> str:
+    def step(
+        self, epoch: int, model, val_f1: float = None, proto_loss: float = None,
+    ) -> str:
         """Advance the phase after `epoch` finished; returns a log note or None."""
         if self.phase == "refine":
             return None
 
         if self.phase == "warmup":
+            if proto_loss is not None and proto_loss == proto_loss:
+                self.last_proto = proto_loss
+                if self.proto_ceiling is not None and proto_loss <= self.proto_ceiling:
+                    self.proto_ok = True
+
             if self.plateau and val_f1 is not None and val_f1 == val_f1:
+                # Track the best on the *raw* score (that is the checkpoint we
+                # want to rewind to) but test the plateau on an EMA, so a
+                # single noisy dip cannot burn the patience budget.
                 if val_f1 > self.best_val + self.min_delta:
-                    self.best_val, self.best_epoch, self.stale = val_f1, epoch, 0
+                    self.best_val, self.best_epoch = val_f1, epoch
                     self._best_state = {
                         k: v.detach().clone() for k, v in model.state_dict().items()
                     }
+                self._ema = (val_f1 if self._ema is None
+                             else self.ema_m * self._ema + (1 - self.ema_m) * val_f1)
+                if not hasattr(self, "_best_ema") or self._ema > self._best_ema + self.min_delta:
+                    self._best_ema, self.stale = self._ema, 0
                 else:
                     self.stale += 1
-            plateaued = self.plateau and self.stale >= self.patience
-            if not (plateaued or epoch >= self.warmup_epochs):
+
+            armed = epoch >= self.min_epochs
+            plateaued = self.plateau and armed and self.stale >= self.patience
+            capped = epoch >= self.warmup_epochs
+            if not (capped or (plateaued and self.proto_ok)):
                 return None
+
             self.phase = "adapt"
             self.adapt_start = epoch + 1
-            why = (f"val plateau ({self.stale} epochs without a gain)" if plateaued
-                   else f"warmup_epochs cap ({self.warmup_epochs})")
+            if plateaued and self.proto_ok:
+                why = f"val plateau ({self.stale} epochs without an EMA gain)"
+            else:
+                why = f"warmup_epochs cap ({self.warmup_epochs})"
             note = f"[phase] warmup -> adapt at epoch {epoch + 1}: {why}"
             if self._best_state is not None:
                 model.load_state_dict(self._best_state)
                 note += (f"; rewound to the warm-up best (epoch "
                          f"{self.best_epoch}, src_val_f1 {self.best_val:.4f})")
                 self._best_state = None      # the rewind is one-shot; free it
+            if self.proto_ceiling is not None and not self.proto_ok:
+                note += (f"\n  ! L_proto is {self.last_proto:.4f}, above the "
+                         f"{self.proto_ceiling:.4f} gate: the FGW distances are "
+                         f"still near chance, so alignment has no class-"
+                         f"meaningful prototypes to pull towards. Raise "
+                         f"--lambda_fgw_margin / --warmup_epochs, or lower "
+                         f"--proto_size.")
             return note
 
         if epoch - self.adapt_start >= self.adapt_epochs - 1:
@@ -151,6 +224,37 @@ class PhaseScheduler:
             return (f"[phase] adapt -> refine at epoch {epoch + 1} "
                     f"(after {self.adapt_epochs} adapt epochs)")
         return None
+
+
+# ---------------------------------------------------------------------- helpers
+def _fmt_prior(p: torch.Tensor) -> str:
+    return "[" + ", ".join(f"{v:.3f}" for v in p.tolist()) + "]"
+
+
+def _make_optimizer(model: FGWPrototypeDA, cfg: FGWConfig) -> torch.optim.Optimizer:
+    """Adam with the prototype bank in its own, decay-free parameter group.
+
+    Weight decay on the bank is actively harmful, not merely useless:
+
+    * `PrototypeBank.embeddings()` LayerNorms `Z`, so the forward pass does not
+      depend on |Z| at all. Decay shrinks the parameter without changing any
+      output, and since the gradient w.r.t. the normalised vector scales as
+      1/|Z|, the effective angular step size grows without bound over a run.
+    * On `E_logits` it destroys the thing the method reads. Decay pulls the
+      logits to 0, so `sigmoid(0) = 0.5`, so `C_p` becomes a constant 0.5
+      matrix — no structural information for the FGW term to use.
+    """
+    proto_params = list(model.prototypes.parameters())
+    proto_ids = {id(p) for p in proto_params}
+    rest = [p for p in model.parameters() if id(p) not in proto_ids]
+    return torch.optim.Adam(
+        [
+            {"params": rest, "weight_decay": cfg.weight_decay},
+            {"params": proto_params,
+             "weight_decay": getattr(cfg, "proto_weight_decay", 0.0)},
+        ],
+        lr=cfg.lr,
+    )
 
 
 # ---------------------------------------------------------------------- caches
@@ -263,10 +367,20 @@ def train_step(
     epoch: int,
     phase: str,
     ramp_pos: int = 0,
+    s_global: torch.Tensor = None,
+    s_local: List[torch.Tensor] = None,
+    target_prior: torch.Tensor = None,
+    struct_density: float = 0.5,
+    scale_probe: dict = None,
 ) -> dict:
     """One optimisation step. `phase` and `ramp_pos` come from the
     `PhaseScheduler` (which owns the warm-up plateau test), so the schedule is
-    not re-derived from `epoch` here."""
+    not re-derived from `epoch` here.
+
+    `s_global` / `s_local` are the FGW transferability weights (see
+    `fgw_select.transferability`); both are None when selection is off, which
+    reproduces the uniform-average behaviour exactly.
+    """
     model.train()
     device = target.x.device
     da = not cfg.no_da
@@ -275,6 +389,7 @@ def train_step(
     ent_w = cfg.lambda_ent * ramp if (da and phase != "warmup") else 0.0
     pl_w = cfg.lambda_pl if (da and phase == "refine") else 0.0
     proto_w = cfg.lambda_proto if da else 0.0
+    margin_w = cfg.lambda_fgw_margin if da else 0.0
 
     src_emb = [model.encode(s.x, s.edge_index) for s in sources]
 
@@ -287,51 +402,82 @@ def train_step(
     # auxiliary term (L_proto) that keeps the prototypes class-meaningful.
     per_src_losses = []          # head CE per source (drives L_cls and V-REx)
     per_src_proto = []           # FGW-prototype CE per source (anchoring)
+    per_src_margin = []          # FGW hinge per source
     per_src_metrics = []
-    for s, emb, cache, labeled in zip(sources, src_emb, src_caches, src_labeled):
+    for j, (s, emb, cache, labeled) in enumerate(
+        zip(sources, src_emb, src_caches, src_labeled)
+    ):
         # Only the labeled subset (the supervision budget) may seed the CE loss;
         # the other source nodes are hidden from supervision.
         n = min(cfg.nodes_per_step, labeled.numel())
-        seeds = labeled[torch.randperm(labeled.numel(), device=device)[:n]]
+        pick = torch.randperm(labeled.numel(), device=device)[:n]
+        seeds = labeled[pick]
         y = s.y[seeds]
+        # s_local is stored per *labeled node*, in the same order as
+        # `src_labeled[j]`, so the sampling permutation indexes it directly.
+        w_node = None if s_local is None else s_local[j][pick]
         head_logits = model.classify(emb[seeds])
-        per_src_losses.append(cls_loss(head_logits, y))
+        per_src_losses.append(cls_loss(head_logits, y, w_node))
         # NOTE: a *training* metric — the same nodes this step backprops through.
         # It says nothing about generalisation and will climb towards 1.0 while
         # held-out performance falls; read `src_val_f1` in the log for that.
         per_src_metrics.append(compute_metrics(head_logits, y))
-        if proto_w > 0:
+        if proto_w > 0 or margin_w > 0:
             Fe, Ce, he = build_ego_batch_from_cache(
                 cache, emb, seeds,
                 anchor_weight=cfg.anchor_weight,
                 anchor_mass_extra=cfg.anchor_mass_extra,
             )
-            if epoch == 0 and not per_src_proto:
+            if scale_probe is not None and not scale_probe:
                 # Scale sanity check: the two structure matrices must sit on a
                 # comparable scale or the FGW geometry is broken. Means should
-                # be within ~2x of each other.
+                # be within ~2x of each other. (This used to be gated on
+                # `epoch == 0` while the loop starts at 1, so it never once
+                # printed — the single most useful diagnostic in the pipeline
+                # was dead code.)
+                scale_probe["done"] = True
                 print(
                     f"[fgw-scale] C_ego mean={Ce.mean().item():.3f} "
                     f"std={Ce.std().item():.3f} | "
-                    f"C_p mean={Cp.mean().item():.3f} std={Cp.std().item():.3f}"
+                    f"C_p mean={Cp.mean().item():.3f} std={Cp.std().item():.3f} "
+                    f"(target density {struct_density:.3f})"
                 )
             d_bcm = pairwise_fgw_distances(
                 Fe, Ce, he, Fp, Cp, q,
                 alpha=cfg.fgw_alpha, epsilon=cfg.fgw_epsilon,
                 max_iter=cfg.fgw_max_iter,
             )
-            per_src_proto.append(cls_loss(fgw_logits(d_bcm, cfg.tau), y))
-    L_cls = torch.stack(per_src_losses).mean()
+            per_src_proto.append(cls_loss(fgw_logits(d_bcm, cfg.tau), y, w_node))
+            if margin_w > 0:
+                per_src_margin.append(
+                    fgw_margin_loss(
+                        fgw_class_distances(d_bcm, cfg.tau), y,
+                        cfg.fgw_margin, w_node,
+                    )
+                )
+
+    # Per-domain transferability. `s_global` is normalised to mean 1, so with
+    # selection off this is exactly the old uniform average.
+    stacked_cls = torch.stack(per_src_losses)
+    if s_global is None:
+        L_cls = stacked_cls.mean()
+    else:
+        L_cls = (stacked_cls * s_global).mean()
     # Always computed, weighted by `cfg.lambda_vrex` (0 by default). The
     # variance of the per-source risks turned out to be a much better
     # *instability detector* than a loss: it is ~0 on healthy epochs and only
     # spikes when one source's CE blows up, so it is kept in the log and out of
     # the objective.
-    L_vrex = vrex_loss(torch.stack(per_src_losses))
-    L_proto = (
-        torch.stack(per_src_proto).mean() if per_src_proto
-        else L_cls.new_zeros(())
-    )
+    L_vrex = vrex_loss(stacked_cls)
+
+    def _pool(terms):
+        if not terms:
+            return L_cls.new_zeros(())
+        t = torch.stack(terms)
+        return t.mean() if s_global is None else (t * s_global).mean()
+
+    L_proto = _pool(per_src_proto)
+    L_margin = _pool(per_src_margin)
 
     # -------------------------------------------------- target align + IM (+ PL)
     zero = L_cls.new_zeros(())
@@ -344,7 +490,11 @@ def train_step(
         p_t = Fnn.softmax(head_logits_t, dim=1)
 
         if ent_w > 0:
-            L_ent = im_loss(p_t)
+            # The prior term is what stops entropy minimisation from walking
+            # to the "one class everywhere" optimum; `target_prior` is the
+            # BBSE estimate (or the pooled source prior as a fallback), never
+            # uniform when a better number is available.
+            L_ent = im_loss(p_t, target_prior, cfg.im_balance_weight)
         if pl_w > 0:
             L_pl = pseudo_label_loss(head_logits_t, p_t.detach(), cfg.pl_threshold)
         if align_w > 0:
@@ -367,15 +517,19 @@ def train_step(
 
     # ---------------------------------------------------- prototype regularisers
     L_sep = L_struct = zero
-    if proto_w > 0:
+    if da:
         # Cosine repulsion on the prototype embeddings: bounded, satisfiable at
         # 0, and no FGW solve (see `separation_loss`).
         L_sep = separation_loss(model.prototypes.embeddings())
-        L_struct = struct_l1_loss(model.prototypes.soft_adjacency())
+        # Density-targeted, not L1-to-zero: see `struct_density_loss`.
+        L_struct = struct_density_loss(
+            model.prototypes.soft_adjacency(), struct_density,
+        )
 
     loss = (
         L_cls
         + proto_w * L_proto
+        + margin_w * L_margin
         + align_w * L_align
         + ent_w * L_ent
         + cfg.lambda_sep * L_sep
@@ -400,6 +554,7 @@ def train_step(
         "loss": loss.item(),
         "L_cls": L_cls.item(),
         "L_proto": L_proto.item(),
+        "L_margin": L_margin.item(),
         "L_align": L_align.item(),
         "L_ent": L_ent.item(),
         "L_sep": L_sep.item(),
@@ -416,22 +571,81 @@ def train_step(
 
 # --------------------------------------------------------------------- evaluate
 @torch.no_grad()
-def evaluate(model: FGWPrototypeDA, data: Data, idx: torch.Tensor = None) -> dict:
-    """Predictions come from the parametric head, so evaluation no longer
-    needs ego-graphs or FGW solves (one cheap encode + MLP pass).
+def predict_logits(
+    model: FGWPrototypeDA,
+    data: Data,
+    idx: torch.Tensor = None,
+    cfg: FGWConfig = None,
+    cache: EgoGraphCache = None,
+) -> torch.Tensor:
+    """Class logits for `idx` (all nodes when None).
 
-    ``idx`` restricts scoring to a node subset (used for the held-out source
-    validation split); the encode still runs on the full graph, so the scored
-    nodes keep their real neighbourhoods.
+    `cfg.predict` selects the head, the FGW prototype distances, or the mean
+    of their log-probabilities. The FGW paths need an ego-graph and an FGW
+    solve per scored node, so they are far more expensive than the head and
+    only pay off once L_proto is well below ln C — hence "head" by default.
     """
     model.eval()
     emb = model.encode(data.x, data.edge_index)
-    logits = model.classify(emb)
-    y = data.y
+    head = model.classify(emb)
     if idx is not None:
-        logits, y = logits[idx], y[idx]
+        head = head[idx]
+
+    mode = getattr(cfg, "predict", "head") if cfg is not None else "head"
+    if mode == "head" or cache is None:
+        return head
+
+    nodes = (torch.arange(data.num_nodes, device=emb.device) if idx is None
+             else idx)
+    Fp, Cp, q = _proto_tensors(model, emb.device)
+    chunks = []
+    step = max(int(getattr(cfg, "eval_batch_nodes", 512)), 1)
+    for start in range(0, nodes.numel(), step):
+        seeds = nodes[start:start + step]
+        Fe, Ce, he = build_ego_batch_from_cache(
+            cache, emb, seeds,
+            anchor_weight=cfg.anchor_weight,
+            anchor_mass_extra=cfg.anchor_mass_extra,
+        )
+        d = pairwise_fgw_distances(
+            Fe, Ce, he, Fp, Cp, q,
+            alpha=cfg.fgw_alpha, epsilon=cfg.fgw_epsilon,
+            max_iter=cfg.fgw_max_iter,
+        )
+        chunks.append(fgw_logits(d, cfg.tau))
+    fgw = torch.cat(chunks, dim=0)
+
+    if mode == "fgw":
+        return fgw
+    # "ensemble": average in log-probability space so the two heads, which
+    # have quite different logit scales, contribute comparably.
+    return 0.5 * (Fnn.log_softmax(head, dim=1) + Fnn.log_softmax(fgw, dim=1))
+
+
+@torch.no_grad()
+def evaluate(
+    model: FGWPrototypeDA,
+    data: Data,
+    idx: torch.Tensor = None,
+    cfg: FGWConfig = None,
+    cache: EgoGraphCache = None,
+    source_prior: torch.Tensor = None,
+    target_prior: torch.Tensor = None,
+) -> dict:
+    """Score `data` (optionally restricted to `idx`).
+
+    The encode always runs on the full graph, so scored nodes keep their real
+    neighbourhoods. When both priors are supplied the logits are re-based onto
+    the target prior before argmax — see `fgw_select.prior_corrected_logits`.
+    Passing them only for the target keeps source metrics untouched.
+    """
+    logits = predict_logits(model, data, idx, cfg, cache)
+    y = data.y if idx is None else data.y[idx]
+    raw_loss = Fnn.cross_entropy(logits, y).item()
+    if source_prior is not None and target_prior is not None:
+        logits = prior_corrected_logits(logits, source_prior, target_prior)
     metrics = compute_metrics(logits, y)
-    metrics["loss"] = Fnn.cross_entropy(logits, y).item()
+    metrics["loss"] = raw_loss
     return metrics
 
 
@@ -564,9 +778,50 @@ def run_training(
         ]
         tgt_cache = _make_cache(target, cfg, device)
 
-    optimizer = torch.optim.Adam(
-        model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay,
-    )
+    optimizer = _make_optimizer(model, cfg)
+
+    # Calibrate the prototype edge density so mean(C_p) lands on mean(C_ego).
+    # Both matrices feed the same FGW structural term, so if they sit on
+    # different scales that term is a class-independent offset and the
+    # "graph" half of the method contributes nothing.
+    struct_density = cfg.struct_density
+    if struct_density is None:
+        if cfg.no_da:
+            struct_density = 0.5
+        else:
+            mean_c_ego = mean_ego_structure(src_caches + [tgt_cache])
+            # C_p = 1 - A, so matching the means means density = 1 - mean(C_ego).
+            struct_density = min(max(1.0 - mean_c_ego, 0.05), 0.95)
+            print(f"Prototype density calibrated to {struct_density:.3f} "
+                  f"(mean C_ego = {mean_c_ego:.3f})")
+
+    # Class priors. The source prior is what the classifier is trained under;
+    # the target one is estimated by BBSE once warm-up ends (see below) and is
+    # never allowed to come from target labels.
+    num_classes = cfg.num_classes
+    src_prior = class_prior(
+        torch.cat([s.y[tr] for s, tr in zip(sources, src_labeled)]), num_classes,
+    ).to(device)
+    if cfg.target_class_prior is not None:
+        tgt_prior = torch.tensor(
+            cfg.target_class_prior, dtype=torch.float, device=device,
+        )
+        tgt_prior = tgt_prior / tgt_prior.sum()
+        prior_note = "given on the command line"
+    else:
+        tgt_prior = src_prior.clone()
+        prior_note = ("source prior, BBSE estimate pending" if cfg.estimate_prior
+                      else "source prior (--estimate_prior to run BBSE)")
+    print(f"Class prior: source {_fmt_prior(src_prior)} | "
+          f"target {_fmt_prior(tgt_prior)} [{prior_note}]; "
+          f"IM balance x{balance_scale(tgt_prior):.2f}")
+
+    # FGW transferability weights; None until the first refresh.
+    s_global = s_local = None
+    select_on = (not cfg.no_da) and cfg.use_selection
+    sel_sub = torch.randperm(target.num_nodes, device=device)[
+        : min(cfg.select_target_nodes, target.num_nodes)
+    ]
 
     # Fixed target subsample for SND, so the score is comparable across epochs.
     snd_sub = torch.randperm(target.num_nodes, device=device)[
@@ -590,24 +845,52 @@ def run_training(
 
     # Phase schedule. The plateau trigger (and the rewind that goes with it)
     # needs the held-out source split; without it warm-up just runs to its cap.
-    sched = PhaseScheduler(cfg, plateau=n_val_total > 0)
+    sched = PhaseScheduler(
+        cfg, plateau=n_val_total > 0, proto_chance=math.log(num_classes),
+    )
+    scale_probe = {}          # one-shot flag for the [fgw-scale] diagnostic
     if not cfg.no_da:
-        trigger = (f"held-out source F1 plateau (patience {sched.patience}) "
-                   f"or {sched.warmup_epochs} epochs"
-                   if sched.plateau else f"{sched.warmup_epochs} epochs (fixed: "
-                   "no source validation split)")
-        print(f"Schedule: warmup until {trigger}, then {sched.adapt_epochs} "
-              f"adapt epochs (ramp {cfg.ramp_epochs}), then refine.")
+        trigger = (f"held-out source F1 plateau (EMA, patience "
+                   f"{sched.patience}, armed after {sched.min_epochs})"
+                   if sched.plateau else "no plateau test (no source val split)")
+        gate = ("" if sched.proto_ceiling is None
+                else f", gated on L_proto <= {sched.proto_ceiling:.3f}")
+        print(f"Schedule: warmup until {trigger}{gate}, capped at "
+              f"{sched.warmup_epochs} epochs; then {sched.adapt_epochs} adapt "
+              f"epochs (ramp {cfg.ramp_epochs}), then refine.")
         if sched.warmup_epochs >= cfg.epochs:
             print(f"  ! warmup_epochs ({sched.warmup_epochs}) >= epochs "
                   f"({cfg.epochs}): adaptation may never start.")
+        if select_on:
+            print(f"Source selection: FGW transferability (s_global, s_local) "
+                  f"refreshed every {cfg.select_every} epochs against "
+                  f"{sel_sub.numel()} target ego-graphs.")
 
     for epoch in range(1, cfg.epochs + 1):
         phase = sched.phase if not cfg.no_da else "srconly"
+
+        # ---- refresh the FGW transferability weights
+        # Only once adaptation has started: during warm-up the encoder is still
+        # moving fast and the estimate would be measuring the initialisation.
+        if (select_on and phase != "warmup"
+                and (s_global is None or epoch % cfg.select_every == 0)):
+            s_global, s_local, dom_d = transferability(
+                model, sources, src_caches, src_labeled, target, tgt_cache,
+                sel_sub, cfg,
+            )
+            print("  [select] " + "  ".join(
+                f"{n}: w {w:.2f} (d {d:.3f})"
+                for n, w, d in zip(cfg.source_domains, s_global.tolist(),
+                                   dom_d.tolist())
+            ))
+
         stats = train_step(
             model, sources, target, src_caches, src_labeled, tgt_cache,
             optimizer, cfg, epoch,
             phase=phase, ramp_pos=sched.ramp_position(epoch),
+            s_global=s_global, s_local=s_local,
+            target_prior=tgt_prior, struct_density=struct_density,
+            scale_probe=None if cfg.no_da else scale_probe,
         )
 
         is_eval = epoch == 1 or epoch % 5 == 0 or epoch == cfg.epochs
@@ -621,7 +904,11 @@ def run_training(
         )
 
         if is_eval:
-            tgt_stats = evaluate(model, target)
+            tgt_stats = evaluate(
+                model, target, cfg=cfg, cache=tgt_cache,
+                source_prior=src_prior if cfg.prior_correct_eval else None,
+                target_prior=tgt_prior if cfg.prior_correct_eval else None,
+            )
             unsup = _target_criteria(model, target, snd_sub, snd_temp)
             record = {
                 "epoch": epoch,
@@ -651,6 +938,7 @@ def run_training(
                 f"loss {stats['loss']:.4f}  "
                 f"cls {stats['L_cls']:.4f}  "
                 f"pr {stats['L_proto']:.4f}  "
+                f"mg {stats['L_margin']:.4f}  "
                 f"al(w={stats['align_w']:.2f}) {stats['L_align']:.4f}  "
                 f"ent {stats['L_ent']:.4f}  "
                 f"sep {stats['L_sep']:.4f}  "
@@ -666,16 +954,34 @@ def run_training(
         if not cfg.no_da:
             note = sched.step(
                 epoch, model, val_stats["f1"] if val_stats else None,
+                proto_loss=stats["L_proto"],
             )
             if note:
                 print(note)
             if phase == "warmup" and sched.phase == "adapt":
+                # Estimate the target prior *here*, from the warm-up-best model:
+                # it is the last point at which the classifier is purely
+                # source-trained, so BBSE's label-shift assumption is clean. Do
+                # it later and the estimate is contaminated by the very IM term
+                # it is supposed to be steering — a feedback loop that would let
+                # the collapse justify itself. The estimate is then frozen.
+                if cfg.estimate_prior and cfg.target_class_prior is None:
+                    est, why = estimate_target_prior(
+                        model, sources, src_val, target, num_classes, src_prior,
+                        max_cond=cfg.bbse_max_cond,
+                    )
+                    if est is not None:
+                        tgt_prior = est
+                        print(f"  [BBSE] target prior estimated as "
+                              f"{_fmt_prior(tgt_prior)} (source "
+                              f"{_fmt_prior(src_prior)})")
+                    else:
+                        print(f"  [BBSE] estimate rejected ({why}); keeping the "
+                              f"source prior {_fmt_prior(src_prior)}")
                 # Adam's moment estimates describe the gradients of the run we
                 # just rewound out of, and the loss surface changes anyway when
                 # the target terms come on. Start the adapt stage clean.
-                optimizer = torch.optim.Adam(
-                    model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay,
-                )
+                optimizer = _make_optimizer(model, cfg)
 
     _report_selection(history, criterion, best_epoch)
 
@@ -683,7 +989,16 @@ def run_training(
         print(f"Restoring checkpoint from epoch {best_epoch} "
               f"(selected by '{criterion}').")
         model.load_state_dict(best_state)
-    return model
+
+    # Everything the caller needs to score the final model exactly the way the
+    # training loop did (same prediction mode, same prior correction).
+    return model, {
+        "src_prior": src_prior,
+        "tgt_prior": tgt_prior if cfg.prior_correct_eval else None,
+        "src_caches": src_caches,
+        "tgt_cache": tgt_cache,
+        "s_global": s_global,
+    }
 
 
 def _report_selection(history: List[dict], criterion: str, best_epoch) -> None:

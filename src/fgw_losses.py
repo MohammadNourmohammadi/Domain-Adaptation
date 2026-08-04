@@ -8,12 +8,16 @@ trivial to ablate any single term.
 Symbols follow the method note:
     L_cls      supervised cross-entropy on the sources
     L_align    target alignment to prototype manifolds (DEC-style)
-    L_ent      information maximisation on the target
+    L_ent      information maximisation on the target (entropy + prior match)
+    L_margin   hinge pushing each source ego away from wrong-class prototypes
     L_sep      cosine repulsion between different classes' prototypes
     L_pl       confidence-thresholded pseudo-label cross-entropy
     L_vrex     variance of per-source risks
-    L_struct   L1 penalty on prototype soft adjacencies
+    L_struct   prototype soft-adjacency density penalty
 """
+
+import math
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -23,8 +27,24 @@ _EPS = 1e-8
 
 
 # --------------------------------------------------------------------- 1
-def cls_loss(logits: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    return F.cross_entropy(logits, y)
+def cls_loss(
+    logits: torch.Tensor,
+    y: torch.Tensor,
+    weights: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Cross-entropy, optionally with a per-example weight.
+
+    ``weights`` carries the node-level transferability score s_local (see
+    `fgw_select.transferability`): source nodes whose ego-graphs sit far
+    from the target manifold contribute less. The weights are renormalised to
+    mean 1 so turning selection on does not silently rescale the loss (and
+    therefore the effective learning rate) relative to the unweighted run.
+    """
+    if weights is None:
+        return F.cross_entropy(logits, y)
+    per = F.cross_entropy(logits, y, reduction="none")
+    w = weights / weights.mean().clamp_min(_EPS)
+    return (per * w).mean()
 
 
 # --------------------------------------------------------------------- 2
@@ -56,17 +76,65 @@ def align_loss(d_bc: torch.Tensor, p_bc: torch.Tensor, tau: float) -> torch.Tens
 
 
 # --------------------------------------------------------------------- 3
-def im_loss(p_bc: torch.Tensor) -> torch.Tensor:
-    """Conditional-entropy minimisation: sharpen each node's prediction.
+def balance_scale(prior: torch.Tensor) -> float:
+    """Multiplier that makes total collapse cost at least what it buys.
 
-    L_ent = mean_v H(p(.|v))
+    Collapsing every target prediction onto the majority class frees `ln C` of
+    conditional entropy and costs `KL(onehot || prior) = -log(max_c prior_c)`
+    of balance penalty. Those are equal only when the prior is uniform — which
+    is why the textbook IM weight of 1.0 works in the balanced setting and
+    quietly fails everywhere else. Under Twitch's estimated target prior
+    [0.844, 0.156] the collapse frees 0.693 and costs 0.170, a net *gain* of
+    0.52, so the run walks straight back to the all-negative predictor even
+    with the balance term present. That is exactly what the first full run did.
 
-    Only the individual (per-node) entropy term is used: minimising it makes
-    every target prediction confident. The marginal / class-balance term has
-    been removed, so this loss imposes no constraint on the overall predicted
-    class mix.
+    Scaling by `ln C / -log(max prior)` restores the balance for any prior and
+    is identically 1 for a uniform one, so this changes nothing in the
+    balanced case. Capped, because a near-degenerate prior would otherwise
+    send the weight to infinity.
     """
-    return -(p_bc * (p_bc + _EPS).log()).sum(dim=1).mean()
+    p_max = float(prior.max().clamp(1e-6, 1 - 1e-6))
+    C = prior.numel()
+    return min(math.log(C) / -math.log(p_max), 20.0)
+
+
+def im_loss(
+    p_bc: torch.Tensor,
+    prior: Optional[torch.Tensor] = None,
+    balance_weight: float = 1.0,
+) -> torch.Tensor:
+    """Information maximisation: sharpen each prediction, hold the class mix.
+
+        L_ent = mean_v H(p(.|v))  +  w * KL(p̄ || prior)
+        w     = balance_weight * balance_scale(prior)
+
+    **The second term is not optional.** Without it this is pure conditional-
+    entropy minimisation, whose global optimum is "predict one class with
+    probability 1 for every target node" — there is nothing else in the
+    objective opposing it. Dropping it is what collapsed the Twitch runs onto
+    the all-negative predictor: `ent` fell 0.67 -> 0.01 while target macro-F1
+    walked down to 0.434, which is exactly the score of predicting the
+    majority class on a graph that is 24.5% positive.
+
+    ``prior`` is the assumed target class distribution. With ``None`` it is
+    uniform, and `KL(p̄ || u) = log C - H(p̄)`, recovering the textbook IM
+    objective up to an additive constant. Uniform is the *wrong* assumption
+    under label shift, though: pooled over the five Twitch sources the
+    positive rate is 0.473 while RU is 0.245, so a uniform marginal actively
+    pulls towards a 50/50 split. Pass the estimated target prior instead —
+    see `fgw_select.estimate_target_prior` — and note that doing so *requires*
+    the `balance_scale` correction to stay collapse-proof.
+
+    Stated as a KL rather than as `-H(p̄)` so that both cases are one code
+    path and the non-uniform case is a proper divergence (>= 0, zero exactly
+    when the predicted mix matches the prior).
+    """
+    ent_individual = -(p_bc * (p_bc + _EPS).log()).sum(dim=1).mean()
+    p_mean = p_bc.mean(dim=0)
+    if prior is None:
+        prior = p_mean.new_full(p_mean.shape, 1.0 / p_mean.numel())
+    div = (p_mean * ((p_mean + _EPS).log() - (prior + _EPS).log())).sum()
+    return ent_individual + balance_weight * balance_scale(prior) * div
 
 
 # --------------------------------------------------------------------- 4
@@ -86,19 +154,14 @@ def separation_loss(proto_Z: torch.Tensor) -> torch.Tensor:
       same data manifold. The hinge therefore never reached zero and its value
       grew roughly linearly with the epoch count — ~0.00095 x epoch, i.e. a
       clock rather than a loss, reaching 58% of the total objective at epoch
-      1000 while the supervised term was 1.6% of it. Worse, the only way the
-      optimiser could reduce it was to inflate prototype magnitudes, which
-      saturated `fgw_logits` and periodically detonated the run through
-      `L_proto`'s gradient into the shared encoder.
+      1000 while the supervised term was 1.6% of it.
     * **It cost a (C*M) x (C*M) FGW solve every step**, which dominated the
       per-step compute for a term that measured nothing.
 
-    The cosine form is bounded in [0, 1], is exactly satisfiable at 0 (any
-    arrangement where distinct classes' prototype means are orthogonal or
-    opposed), and is ~1000x cheaper. Within-class slots are deliberately left
-    unconstrained: their diversity is what the M-way soft-min in
-    `fgw_class_distances` is for, and the old `intra_margin` hinge only ever
-    fought the class-level signal.
+    The cosine form is bounded in [0, 1], is exactly satisfiable at 0, and is
+    ~1000x cheaper. It only constrains a summary statistic, though, which is
+    not on its own enough to make the FGW distances class-discriminative —
+    `fgw_margin_loss` is the term that does that job directly.
     """
     C, M = proto_Z.shape[:2]
     mu = F.normalize(proto_Z.mean(dim=2), dim=-1)                  # (C, M, d)
@@ -115,6 +178,44 @@ def separation_loss(proto_Z: torch.Tensor) -> torch.Tensor:
 
 
 # --------------------------------------------------------------------- 5
+def fgw_margin_loss(
+    d_bc: torch.Tensor,
+    y: torch.Tensor,
+    margin: float,
+    weights: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Hinge on the *source-conditional* FGW class distances.
+
+        mean_v relu( margin + d_y(v) - min_{c != y} d_c(v) )
+
+    `L_proto` (cross-entropy on `-d/tau`) is supposed to make the prototypes
+    class-meaningful, but on its own it never did: across a 350-epoch run
+    `L_proto` sat at 0.687 against ln 2 = 0.693, i.e. d_0(v) ≈ d_1(v) for
+    every ego graph, so the FGW branch carried no class information at all and
+    `L_align` was pulling the target toward prototypes that could not tell the
+    classes apart. The reason is that softmax cross-entropy has a vanishing
+    gradient exactly where the run is stuck: at d_0 = d_1 the logit difference
+    is 0, and the gradient it produces is proportional to that difference.
+
+    A hinge does not vanish there. Below the margin it applies a constant-
+    magnitude force separating the correct-class distance from the nearest
+    wrong-class one, which is precisely the geometry `L_proto` needs and
+    cannot bootstrap by itself. It is applied to the sources only, where the
+    labels are real — this is not a pseudo-label term.
+
+    ``weights`` is the optional per-node s_local (see `cls_loss`).
+    """
+    idx = y.view(-1, 1)
+    d_true = d_bc.gather(1, idx).squeeze(1)                       # (B,)
+    d_other = d_bc.scatter(1, idx, float("inf")).min(dim=1).values
+    viol = F.relu(margin + d_true - d_other)
+    if weights is None:
+        return viol.mean()
+    w = weights / weights.mean().clamp_min(_EPS)
+    return (viol * w).mean()
+
+
+# --------------------------------------------------------------------- 6
 def pseudo_label_loss(
     logits: torch.Tensor, p_bc: torch.Tensor, threshold: float,
 ) -> torch.Tensor:
@@ -125,11 +226,34 @@ def pseudo_label_loss(
     return F.cross_entropy(logits[mask], pred[mask])
 
 
-# --------------------------------------------------------------------- 6
+# --------------------------------------------------------------------- 7
 def vrex_loss(per_source_losses: torch.Tensor) -> torch.Tensor:
     return per_source_losses.var(unbiased=False)
 
 
-# --------------------------------------------------------------------- 7
-def struct_l1_loss(A: torch.Tensor) -> torch.Tensor:
-    return A.abs().mean()
+# --------------------------------------------------------------------- 8
+def struct_density_loss(A: torch.Tensor, target_density: float) -> torch.Tensor:
+    """Pull each prototype's edge density towards `target_density`.
+
+    The previous term was `A.abs().mean()`, plain L1 on the soft adjacency.
+    Since the structure matrix the FGW solver actually sees is `C_p = 1 - A`,
+    driving A -> 0 drives C_p -> all-ones: **a constant matrix, carrying zero
+    structural information**. Weight decay was pushing the same way from the
+    other side — it pulls `E_logits` -> 0, hence `sigmoid(0) = 0.5`, hence
+    `C_p` -> 0.5 everywhere, also constant. Between them the two regularisers
+    were erasing exactly the structure the method is built on, which is a
+    large part of why the FGW distances never separated the classes.
+
+    Targeting a density instead keeps the penalty (prototypes stay simple and
+    do not saturate) while leaving the *pattern* of A free, which is the part
+    that carries information. `run_training` calibrates `target_density` from
+    the data so that `mean(C_p)` matches `mean(C_ego)`; putting both structure
+    matrices on one scale is the precondition for the FGW structural term to
+    mean anything.
+    """
+    n_p = A.size(-1)
+    off_diag = n_p * (n_p - 1)
+    if off_diag == 0:
+        return A.new_zeros(())
+    dens = A.flatten(start_dim=-2).sum(dim=-1) / off_diag          # (C, M)
+    return (dens - target_density).abs().mean()
