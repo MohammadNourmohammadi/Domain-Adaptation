@@ -16,7 +16,7 @@ Usage:
     python main_yelp_fgw.py                                   # -> Phoenix target
     python main_yelp_fgw.py --target Toronto                  # sources auto-fill
     python main_yelp_fgw.py --sources Madison Glendale --target Phoenix
-    python main_yelp_fgw.py --glove_path data/yelp/glove/glove.6B.100d.txt
+    python main_yelp_fgw.py --min_common_reviewers 5   # sparser co-review graph
 """
 
 import argparse
@@ -48,7 +48,8 @@ def parse_args() -> FGWConfig:
     parser.add_argument("--data_root", type=str, default="data/yelp")
     parser.add_argument("--glove_path", type=str, default=None,
                         help="GLOVE vectors file (default: "
-                             "data/yelp/glove/glove.6B.300d.txt)")
+                             "data/yelp/glove/glove.6B.100d.txt — SelMAG's "
+                             "Table 3 lists 100 attributes)")
     parser.add_argument("--glove_url", type=str, default=None,
                         help="URL of the glove.6B.zip to auto-download "
                              "(default: the Hugging Face mirror)")
@@ -58,15 +59,19 @@ def parse_args() -> FGWConfig:
     parser.add_argument("--gdrive_id", type=str, default=None,
                         help="Google-Drive file id of the Yelp .tgz to download "
                              "(default: the built-in old-round SelMAG dump)")
-    parser.add_argument("--min_common_reviewers", type=int, default=1,
+    parser.add_argument("--min_common_reviewers", type=int, default=3,
                         help="POIs are linked when at least this many reviewers "
-                             "are shared")
-    parser.add_argument("--max_user_degree", type=int, default=100,
+                             "are shared. At 1 the graphs reach average degree "
+                             "250-416, ~15x SelMAG's Table 3, and a 2-layer GCN "
+                             "then averages most of the graph into every node")
+    parser.add_argument("--max_user_degree", type=int, default=20,
                         help="drop reviewers above this POI count before "
-                             "building co-review edges")
+                             "building co-review edges. A user\'s contribution "
+                             "is quadratic in this: at 100 one power-reviewer "
+                             "alone creates C(100,2)=4,950 edges, at 20 only 190")
     parser.add_argument("--directed", action="store_true",
                         help="keep co-review edges directed (default: symmetrise)")
-    # Yelp is 6-class with dense 300-d GLOVE features; everything below is the
+    # Yelp is 5-class with dense 100-d GLOVE features; everything below is the
     # shared method surface (see src/fgw_cli.py).
     add_method_args(parser, hidden_dim=64, fgw_alpha=0.5, ego_size=16)
     args = parser.parse_args()

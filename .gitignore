@@ -213,3 +213,9 @@ data/citation/
 data/yelp/raw/
 data/yelp/glove/
 data/yelp/*/processed_fgw.pt
+
+# ogbn-arxiv archive, unpacked CSVs and parsed .npy cache (~250 MB, re-downloadable)
+data/arxiv/
+
+# Cora_full archive (12 MB, re-downloadable)
+data/cora_full/

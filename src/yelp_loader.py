@@ -71,10 +71,22 @@ YELP_CITY_ALIASES: Dict[str, set] = {
     "Phoenix": {"phoenix"},
 }
 YELP_CITIES = list(YELP_CITY_ALIASES.keys())
+
+# SelMAG Table 3 for Yelp: 13,903 nodes and 232,525 edges per graph, i.e. an
+# average degree around 2*232525/13903 ~= 33 if that edge count is undirected,
+# or ~17 if it is doubled the way the Twitch row is. Either way the co-review
+# rule must be far stricter than "one shared reviewer": at min_common_reviewers
+# =1 / max_user_degree=100 the built graphs reach average degree 250 (Phoenix)
+# to 416 (Las Vegas), 15-25x too dense, and a 2-layer GCN then aggregates ~67%
+# of the graph into every node. Measured on Phoenix with everything else held
+# fixed, that costs 0.53 macro-F1 against the same model with no edges at all.
+_PAPER_AVG_DEGREE = 33.0
 YELP_TARGET_CITY = "Phoenix"        # the paper's held-out target graph
 
-YELP_FEATURE_DIM = 300              # GLOVE dim (glove.6B.300d); re-derived from
-                                    # the vector file at build time.
+YELP_FEATURE_DIM = 100              # GLOVE dim. SelMAG Table 3 lists
+                                    # "#Attributes 100", i.e. glove.6B.100d;
+                                    # re-derived from the vector file at build
+                                    # time, so passing another file just works.
 YELP_NUM_CLASSES = 5               # {Food, Shop, Home Service, Health, Finance}
 
 # Class index -> the Yelp top-level categories that map onto it. Order matters:
@@ -282,7 +294,7 @@ YELP_GLOVE_URL = "https://huggingface.co/stanfordnlp/glove/resolve/main/glove.6B
 
 
 def _default_glove_path(data_root: str) -> str:
-    return os.path.join(data_root, "glove", "glove.6B.300d.txt")
+    return os.path.join(data_root, "glove", "glove.6B.100d.txt")
 
 
 def _glove_hint(glove_path: str) -> str:
@@ -541,9 +553,30 @@ def _build_and_cache_all(
         )
         city_dir = os.path.join(data_root, folder)
         os.makedirs(city_dir, exist_ok=True)
-        cache_path = os.path.join(city_dir, "processed_fgw.pt")
+        cache_path = _cache_path(data_root, folder, min_common_reviewers,
+                                 max_user_degree)
         torch.save(data, cache_path)
-        print(f"  [yelp] {folder}: {n} POIs, {ei.size(1)} edges -> cached {cache_path}")
+        und = ei.size(1) // (2 if symmetrize else 1)
+        avg_deg = (2.0 * und / n) if n else 0.0
+        flag = ""
+        if avg_deg > 2 * _PAPER_AVG_DEGREE:
+            flag = (f"  <-- {avg_deg / _PAPER_AVG_DEGREE:.0f}x the paper's "
+                    f"~{_PAPER_AVG_DEGREE:.0f}; raise --min_common_reviewers "
+                    f"or lower --max_user_degree")
+        print(f"  [yelp] {folder}: {n} POIs, {und} undirected edges, "
+              f"avg degree {avg_deg:.1f}{flag} -> cached {cache_path}")
+
+
+def _cache_path(data_root: str, city: str, mcr: int, mud: int) -> str:
+    """Cache file for one city *at these graph-construction settings*.
+
+    The parameters are in the filename because they change the graph, and the
+    old name (`processed_fgw.pt`) did not encode them: changing
+    --min_common_reviewers silently reloaded the previous graph and the flag
+    appeared to do nothing. Different settings now coexist instead of shadowing
+    each other.
+    """
+    return os.path.join(data_root, city, f"processed_fgw_r{mcr}_u{mud}.pt")
 
 
 # --------------------------------------------------------------- public API
@@ -551,8 +584,8 @@ def load_yelp_city(
     data_root: str,
     city: str,
     glove_path: Optional[str] = None,
-    min_common_reviewers: int = 1,
-    max_user_degree: int = 100,
+    min_common_reviewers: int = 3,
+    max_user_degree: int = 20,
     symmetrize: bool = True,
     auto_download: bool = True,
     gdrive_id: Optional[str] = None,
@@ -568,7 +601,8 @@ def load_yelp_city(
     if city not in YELP_CITY_ALIASES:
         raise ValueError(f"Unknown Yelp city '{city}'. Choose from {YELP_CITIES}.")
 
-    cache_path = os.path.join(data_root, city, "processed_fgw.pt")
+    cache_path = _cache_path(data_root, city, min_common_reviewers,
+                             max_user_degree)
     if os.path.exists(cache_path):
         return torch.load(cache_path, weights_only=False)
 
@@ -593,8 +627,8 @@ def load_sources_target(
     sources: List[str],
     target: str,
     glove_path: Optional[str] = None,
-    min_common_reviewers: int = 1,
-    max_user_degree: int = 100,
+    min_common_reviewers: int = 3,
+    max_user_degree: int = 20,
     symmetrize: bool = True,
     auto_download: bool = True,
     gdrive_id: Optional[str] = None,
