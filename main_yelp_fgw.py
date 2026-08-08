@@ -20,7 +20,7 @@ Usage:
 """
 
 import argparse
-import statistics
+import os
 
 import torch
 
@@ -34,8 +34,9 @@ from src.yelp_loader import (
 from src.fgw_cli import add_method_args, method_kwargs, pick_device, seed_list
 from src.fgw_config import FGWConfig
 from src.fgw_model import FGWPrototypeDA
-from src.fgw_train import evaluate, run_training
-from src.utils import majority_baseline, set_seed
+from src.fgw_train import run_training, summarize_run
+from src.run_artifacts import Tee, allocate_run_dir, report_and_save
+from src.utils import set_seed
 
 
 def parse_args() -> FGWConfig:
@@ -133,28 +134,11 @@ def run_once(cfg: FGWConfig, sources, target, seed: int) -> dict:
     print(f"\nModel parameters: {sum(p.numel() for p in model.parameters()):,}")
     print("\nTraining ...\n")
     model, ctx = run_training(model, sources, target, cfg)
-
-    dev_sources = [s.to(cfg.device) for s in sources]
-    dev_target = target.to(cfg.device)
-
-    print("\n" + "-" * 60)
-    print(f"  Seed {seed} results")
-    print("-" * 60)
-    for name, g, cache in zip(cfg.source_domains, dev_sources, ctx["src_caches"]):
-        st = evaluate(model, g, cfg=cfg, cache=cache)
-        print(f"  Source {name:>10}: ACC {st['acc']:.4f}  "
-              f"AUROC {st['auc']:.4f}  MacroF {st['f1']:.4f}")
-    tgt = evaluate(
-        model, dev_target, cfg=cfg, cache=ctx["tgt_cache"],
-        source_prior=ctx["src_prior"], target_prior=ctx["tgt_prior"],
-    )
-    print(f"  Target {cfg.target_domain:>10}: ACC {tgt['acc']:.4f}  "
-          f"AUROC {tgt['auc']:.4f}  MacroF {tgt['f1']:.4f}")
-    return tgt
+    return summarize_run(model, sources, target, cfg, ctx, seed,
+                         name_width=10)
 
 
-def main():
-    cfg, seeds = parse_args()
+def _main(cfg, seeds, run_dir):
     set_seed(cfg.seed)
 
     print("=" * 60)
@@ -211,21 +195,21 @@ def main():
 
     runs = [run_once(cfg, sources, target, sd) for sd in seeds]
 
-    print("\n" + "=" * 60)
-    print(f"  Final results — {cfg.target_domain}, {len(runs)} run(s)")
-    print("=" * 60)
-    base = majority_baseline(target.y, cfg.num_classes)
-    print(f"  majority class : ACC {base['acc']:.4f}  AUROC {base['auc']:.4f}  "
-          f"MacroF {base['f1']:.4f}   (no-skill reference)")
-    for key, label in (("acc", "ACC"), ("auc", "AUROC"), ("f1", "MacroF")):
-        vals = [r[key] for r in runs]
-        if len(vals) > 1:
-            print(f"  {label:<14}: {statistics.mean(vals):.4f} "
-                  f"+- {statistics.stdev(vals):.4f}   "
-                  f"({', '.join(f'{v:.4f}' for v in vals)})")
-        else:
-            print(f"  {label:<14}: {vals[0]:.4f}")
-    print("=" * 60)
+    report_and_save(
+        cfg, seeds, runs, target, dataset="yelp",
+        root=cfg.out_dir, run_dir=run_dir,
+        make_figures=not cfg.no_figures,
+    )
+
+
+def main():
+    """Allocate this run's folder, then mirror everything printed into it."""
+    cfg, seeds = parse_args()
+    if getattr(cfg, "show_split", False) or cfg.no_save:
+        return _main(cfg, seeds, None)
+    run_dir = allocate_run_dir(cfg.out_dir, "yelp", cfg.target_domain)
+    with Tee(os.path.join(run_dir, "log.txt")):
+        return _main(cfg, seeds, run_dir)
 
 
 if __name__ == "__main__":

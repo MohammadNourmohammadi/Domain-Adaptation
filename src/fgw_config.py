@@ -43,12 +43,40 @@ class FGWConfig:
     # reporting unless an unsupervised criterion is chosen).
     source_val_frac: float = 0.2
 
-    # Checkpoint criterion. "src_val": pooled held-out source macro-F1 (the
+    # Checkpoint criterion. "src_val": pooled held-out source score (the
     # honest default). "snd" / "entropy": unsupervised target criteria, usable
     # when no source labels may be held out. "last": report the final epoch.
     # Target labels are never a selection input under any setting; the oracle
     # target number is printed for reference only.
     model_selection: str = "src_val"
+
+    # Which statistic `src_val` scores, and what the warm-up plateau test
+    # watches. Macro-F1 is the metric being reported, so selecting on it is the
+    # aligned choice — but it is an average over C per-class F1 scores, and with
+    # few held-out nodes per class it is mostly variance. Cora_full is the case
+    # that breaks: a 10% budget on 3,299-node graphs leaves 66 validation nodes
+    # per source, 330 pooled, spread over 70 classes — half of them with zero or
+    # one node — so the "best" epoch is close to a lottery, and that same signal
+    # also drives the warm-up rewind. "auto" uses macro-F1 when the pooled split
+    # holds at least `val_f1_min_per_class` nodes per class and plain accuracy
+    # otherwise (lower variance, slightly misaligned under imbalance); "f1" and
+    # "acc" force the choice.
+    val_metric: str = "auto"
+    val_f1_min_per_class: float = 10.0
+
+    # Inverse-frequency class weights on the supervised source terms (head CE,
+    # L_proto, L_margin), normalised to mean 1 over the batch.
+    #
+    # Off by default because it changes the objective on every dataset. It is
+    # worth turning on wherever macro-F1 is the headline and the label
+    # distribution is long-tailed: Arxiv has 17 of 40 classes below 1% of nodes
+    # and Cora_full 70 classes spanning 15-928 papers, which is exactly why both
+    # rows of the paper show macro-F1 far below accuracy (38.3/26.4 and
+    # 55.4/31.2). Plain CE optimises accuracy, so the tail is free to be ignored.
+    class_weighted_ce: bool = False
+    # Exponent on the inverse frequency: 1.0 = full inverse-frequency, 0.5 = the
+    # gentler square-root form that is usually the better bias/variance trade.
+    class_weight_power: float = 0.5
     snd_temp: float = 0.05        # SND similarity softmax temperature
     snd_max_nodes: int = 2000     # subsample cap for the O(N^2) SND matrix
 
@@ -82,6 +110,21 @@ class FGWConfig:
     ppr_iters: int = 20           # power-iteration steps
     anchor_weight: float = 1.0    # w on the anchor indicator coordinate
     anchor_mass_extra: float = 0.2  # extra probability mass on the center
+
+    # ------------------------------------------------- graph densification
+    # Feature-space kNN edges added to nodes whose degree is below
+    # `knn_min_degree`. 0 = off (the default: this changes the input graph, so
+    # it belongs in the method description, not in the defaults).
+    #
+    # The six-graph splits of Cora_full and Arxiv induce subgraphs, which
+    # shatters them: average degree 0.95-2.06 with 32-50% isolated nodes
+    # (Cora_full) and 1.5-4.4 with 9-48% isolated (Arxiv), against 6.6-64 and
+    # ~0% isolated on Citation/Twitch/Yelp. Below `ego_size` neighbours there is
+    # no ego-graph to speak of and a 2-layer GCN degenerates to an MLP. Reads
+    # `x` only — never a label — and is applied to sources and target alike.
+    # See `src/graph_augment.py`.
+    knn_augment: int = 0
+    knn_min_degree: int = 3
 
     # --------------------------------------------------------- prototype bank
     num_classes: int = 2
@@ -263,6 +306,15 @@ class FGWConfig:
     # ----------------------------------------------- mini-batching over nodes
     nodes_per_step: int = 128
     eval_batch_nodes: int = 512
+
+    # ------------------------------------------------------- run artefacts
+    # Each run gets its own numbered folder under `out_dir` holding the console
+    # log, this config, per-epoch history, final metrics and the paper figures.
+    # See `src/run_artifacts.py`.
+    out_dir: str = "runs"
+    no_figures: bool = False      # keep the log/CSV/JSON, skip the plots
+    no_save: bool = False         # write nothing (the old behaviour)
+    note: str = ""                # free text stored in config.json / index.csv
 
     # ------------------------------------------------------------- system
     device: str = "cpu"

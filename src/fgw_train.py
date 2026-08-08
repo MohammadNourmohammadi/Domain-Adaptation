@@ -57,6 +57,7 @@ ego caches so the caller can score the final model exactly as the loop did.
 import math
 from typing import List
 
+import numpy as np
 import torch
 import torch.nn.functional as Fnn
 from torch_geometric.data import Data
@@ -85,6 +86,7 @@ from .fgw_select import (
     prior_corrected_logits,
     transferability,
 )
+from .graph_augment import augment_knn
 from .utils import compute_metrics
 
 
@@ -208,7 +210,7 @@ class PhaseScheduler:
             if self._best_state is not None:
                 model.load_state_dict(self._best_state)
                 note += (f"; rewound to the warm-up best (epoch "
-                         f"{self.best_epoch}, src_val_f1 {self.best_val:.4f})")
+                         f"{self.best_epoch}, src_val {self.best_val:.4f})")
                 self._best_state = None      # the rewind is one-shot; free it
             if self.proto_ceiling is not None and not self.proto_ok:
                 note += (f"\n  ! L_proto is {self.last_proto:.4f}, above the "
@@ -372,6 +374,7 @@ def train_step(
     target_prior: torch.Tensor = None,
     struct_density: float = 0.5,
     scale_probe: dict = None,
+    class_weights: torch.Tensor = None,
 ) -> dict:
     """One optimisation step. `phase` and `ramp_pos` come from the
     `PhaseScheduler` (which owns the warm-up plateau test), so the schedule is
@@ -416,6 +419,12 @@ def train_step(
         # s_local is stored per *labeled node*, in the same order as
         # `src_labeled[j]`, so the sampling permutation indexes it directly.
         w_node = None if s_local is None else s_local[j][pick]
+        # Class weights ride the same per-node channel, so they reach the head
+        # CE, L_proto and the FGW hinge in one place. `cls_loss` renormalises to
+        # mean 1, so this changes the *relative* weighting only.
+        if class_weights is not None:
+            cw = class_weights[y]
+            w_node = cw if w_node is None else w_node * cw
         head_logits = model.classify(emb[seeds])
         per_src_losses.append(cls_loss(head_logits, y, w_node))
         # NOTE: a *training* metric — the same nodes this step backprops through.
@@ -436,9 +445,19 @@ def train_step(
                 # printed — the single most useful diagnostic in the pipeline
                 # was dead code.)
                 scale_probe["done"] = True
+                # Average over the *reached* pairs only. Unreached slots are
+                # filled with 1 and carry no mass, so including them reports a
+                # scale mismatch that does not exist: on Yelp the raw mean is
+                # 0.81 against C_p's 0.45, while the pairs the solver actually
+                # sees average 0.47. `he > 0` is exactly the support mask.
+                v = (he > 0).to(Ce.dtype)
+                pw = v.unsqueeze(-1) * v.unsqueeze(-2)
+                pw = pw * (1.0 - torch.eye(pw.size(-1), device=pw.device))
+                c_mean = (Ce * pw).sum() / pw.sum().clamp_min(1.0)
+                c_var = ((Ce - c_mean) ** 2 * pw).sum() / pw.sum().clamp_min(1.0)
                 print(
-                    f"[fgw-scale] C_ego mean={Ce.mean().item():.3f} "
-                    f"std={Ce.std().item():.3f} | "
+                    f"[fgw-scale] C_ego mean={c_mean.item():.3f} "
+                    f"std={c_var.sqrt().item():.3f} (over reached pairs) | "
                     f"C_p mean={Cp.mean().item():.3f} std={Cp.std().item():.3f} "
                     f"(target density {struct_density:.3f})"
                 )
@@ -649,6 +668,25 @@ def evaluate(
     return metrics
 
 
+def _val_key(cfg: FGWConfig, num_classes: int, n_val: int) -> str:
+    """Which held-out-source statistic drives selection and the plateau test.
+
+    Macro-F1 is the reported metric, so it is the aligned choice — but it is a
+    mean of `num_classes` per-class F1 scores and needs enough held-out nodes
+    per class to be a signal rather than variance. Cora_full is where that
+    fails: 10% of a 3,299-node graph, 20% held out, is 66 nodes per source and
+    330 pooled, spread over 70 classes, so half the classes contribute an F1
+    estimated from zero or one node. That noise picks the reported checkpoint
+    *and* the warm-up rewind point. Accuracy is lower-variance and slightly
+    misaligned under imbalance; below the threshold it is the better trade.
+    """
+    mode = getattr(cfg, "val_metric", "auto")
+    if mode in ("f1", "acc"):
+        return mode
+    per_class = float(getattr(cfg, "val_f1_min_per_class", 10.0))
+    return "f1" if n_val >= per_class * max(num_classes, 1) else "acc"
+
+
 @torch.no_grad()
 def _source_val_metrics(
     model: FGWPrototypeDA, sources: List[Data], src_val: List[torch.Tensor],
@@ -716,6 +754,17 @@ def run_training(
     target = target.to(device)
     model = model.to(device)
 
+    # Optional feature-kNN densification, before anything reads the topology
+    # (SVD basis, ego caches, encoder). Sources and target alike; no labels.
+    k_aug = int(getattr(cfg, "knn_augment", 0) or 0)
+    if k_aug > 0:
+        print(f"Densifying with {k_aug} feature-kNN edges per node below degree "
+              f"{cfg.knn_min_degree} (transductive, label-free):")
+        for name, g in zip(cfg.source_domains, sources):
+            augment_knn(g, k_aug, cfg.knn_min_degree, name=name)
+        augment_knn(target, k_aug, cfg.knn_min_degree,
+                    name=f"{cfg.target_domain} (target)")
+
     # Frozen input projection: fit the basis on the stacked feature matrix of
     # every graph before anything is trained. No labels are involved, so this is
     # not model selection or leakage — it is a data-dependent change of basis
@@ -749,9 +798,30 @@ def run_training(
             for name, s, tr, va in zip(cfg.source_domains, sources, src_labeled, src_val)
         )
         draw = "stratified" if stratified else "random"
+        # The stratified draw takes at least one node per class, so on a
+        # long-tailed label set the realised budget sits slightly above `ratio`.
+        # Print what was actually revealed rather than what was asked for.
+        revealed = sum(tr.numel() + va.numel() for tr, va in splits)
+        total_nodes = sum(s.num_nodes for s in sources)
+        eff = revealed / max(total_nodes, 1)
+        eff_note = "" if abs(eff - ratio) < 5e-3 else f" -> {eff:.1%} realised"
         print(f"Supervision budget: {ratio:.0%} source labels ({draw} draw, "
-              f"{val_frac:.0%} held out for selection) -> "
+              f"{val_frac:.0%} held out for selection){eff_note} -> "
               f"train+val nodes [{labeled_desc}]")
+        if stratified:
+            covered = [
+                int(torch.unique(s.y[tr]).numel())
+                for s, tr in zip(sources, src_labeled)
+            ]
+            print(f"  classes covered by the training labels: "
+                  f"{covered} of {cfg.num_classes}")
+
+    # Everything the figure/report layer needs, filled in as the run proceeds
+    # (see `src/plots.py`). Collecting it here rather than re-deriving it from
+    # the log keeps the saved artefacts exact.
+    support_stats: dict = {}
+    events: List[dict] = []
+    selection_trace: List[dict] = []
 
     if cfg.no_da:
         # Pure source-supervised baseline: the head never touches the FGW
@@ -777,6 +847,19 @@ def run_training(
             for s, lab in zip(sources, src_labeled)
         ]
         tgt_cache = _make_cache(target, cfg, device)
+        # How much of each ego-graph is real. On an induced-subgraph split most
+        # seeds sit in a component smaller than k, and the slots PPR never
+        # reached now carry zero mass instead of a fixed set of strangers (see
+        # `fgw_ego`). A low mean support is the signal that the structural half
+        # of the method has little to work with — consider --knn_augment.
+        for name, c in zip(list(cfg.source_domains) + [cfg.target_domain],
+                           src_caches + [tgt_cache]):
+            st = c.support_stats()
+            if st:
+                support_stats[name] = st
+                print(f"  ego support {name}: mean {st['mean_support']:.1f}/"
+                      f"{st['k']} nodes, {100 * st['frac_full']:.0f}% full, "
+                      f"{100 * st['frac_singleton']:.0f}% isolated")
 
     optimizer = _make_optimizer(model, cfg)
 
@@ -816,6 +899,29 @@ def run_training(
           f"target {_fmt_prior(tgt_prior)} [{prior_note}]; "
           f"IM balance x{balance_scale(tgt_prior):.2f}")
 
+    # Inverse-frequency class weights on the supervised source terms. Computed
+    # from the *training* half of the revealed labels only (the held-out split
+    # stays untouched), normalised to mean 1 so the loss scale is unchanged.
+    class_weights = None
+    if getattr(cfg, "class_weighted_ce", False):
+        power = float(getattr(cfg, "class_weight_power", 0.5))
+        counts = torch.bincount(
+            torch.cat([s.y[tr] for s, tr in zip(sources, src_labeled)]),
+            minlength=num_classes,
+        ).float().to(device)
+        # A class with no labeled node is never indexed, but it must not be
+        # allowed to set the normalising mean: `class_prior`'s 1e-6 floor would
+        # give it a weight of ~1000 and shrink every real weight to nothing.
+        present = counts > 0
+        w = torch.ones_like(counts)
+        w[present] = counts[present].pow(-power)
+        class_weights = w / w[present].mean()
+        print(f"Class-weighted CE on (inverse-frequency^{power}): weights "
+              f"{class_weights[present].min():.2f}-"
+              f"{class_weights[present].max():.2f} over "
+              f"{int(present.sum())} labeled classes"
+              f"{'' if bool(present.all()) else f' ({int((~present).sum())} of {num_classes} have no labeled node)'}")
+
     # FGW transferability weights; None until the first refresh.
     s_global = s_local = None
     select_on = (not cfg.no_da) and cfg.use_selection
@@ -834,6 +940,15 @@ def run_training(
         print("No source validation nodes available -> model_selection falls "
               "back to 'last'.")
         criterion = "last"
+    val_key = _val_key(cfg, num_classes, n_val_total)
+    val_label = f"src_val_{val_key}"
+    if n_val_total:
+        why = ("" if getattr(cfg, "val_metric", "auto") != "auto" else
+               f" ({n_val_total} held-out nodes / {num_classes} classes = "
+               f"{n_val_total / max(num_classes, 1):.1f} per class)")
+        print(f"Held-out source split scored by "
+              f"{'macro-F1' if val_key == 'f1' else 'accuracy'}{why}; this "
+              f"drives both the warm-up plateau test and checkpoint selection.")
     # Every candidate criterion is tracked at each eval epoch, not just the one
     # doing the selecting: the end-of-run table then shows what each *would*
     # have picked and what that costs against the oracle.
@@ -878,6 +993,11 @@ def run_training(
                 model, sources, src_caches, src_labeled, target, tgt_cache,
                 sel_sub, cfg,
             )
+            selection_trace.append({
+                "epoch": epoch,
+                "weights": [float(v) for v in s_global.tolist()],
+                "distances": [float(v) for v in dom_d.tolist()],
+            })
             print("  [select] " + "  ".join(
                 f"{n}: w {w:.2f} (d {d:.3f})"
                 for n, w, d in zip(cfg.source_domains, s_global.tolist(),
@@ -891,6 +1011,7 @@ def run_training(
             s_global=s_global, s_local=s_local,
             target_prior=tgt_prior, struct_density=struct_density,
             scale_probe=None if cfg.no_da else scale_probe,
+            class_weights=class_weights,
         )
 
         is_eval = epoch == 1 or epoch % 5 == 0 or epoch == cfg.epochs
@@ -912,11 +1033,22 @@ def run_training(
             unsup = _target_criteria(model, target, snd_sub, snd_temp)
             record = {
                 "epoch": epoch,
-                "src_val": val_stats["f1"] if val_stats else float("nan"),
+                "phase": stats["phase"],
+                "src_val": val_stats[val_key] if val_stats else float("nan"),
+                "src_val_f1": val_stats["f1"] if val_stats else float("nan"),
+                "src_val_acc": val_stats["acc"] if val_stats else float("nan"),
+                "src_train_f1": stats["src_train_f1"],
                 "snd": unsup["snd"],
                 "neg_ent": unsup["neg_ent"],
+                "tgt_acc": tgt_stats["acc"],
                 "tgt_f1": tgt_stats["f1"],
                 "tgt_auc": tgt_stats["auc"],
+                "loss": stats["loss"],
+                "align_w": stats["align_w"],
+                "ent_w": stats["ent_w"],
+                **{k: stats[k] for k in (
+                    "L_cls", "L_proto", "L_margin", "L_align", "L_ent",
+                    "L_sep", "L_vrex", "L_struct", "L_pl")},
             }
             history.append(record)
 
@@ -930,8 +1062,8 @@ def run_training(
                     }
 
             val_txt = (
-                f"src_val_f1 {record['src_val']:.4f}" if val_stats
-                else "src_val_f1   n/a "
+                f"{val_label} {record['src_val']:.4f}" if val_stats
+                else f"{val_label}   n/a "
             )
             print(
                 f"Epoch {epoch:3d} [{stats['phase']:>7}] "
@@ -952,12 +1084,17 @@ def run_training(
             )
 
         if not cfg.no_da:
+            was = sched.phase
             note = sched.step(
-                epoch, model, val_stats["f1"] if val_stats else None,
+                epoch, model, val_stats[val_key] if val_stats else None,
                 proto_loss=stats["L_proto"],
             )
             if note:
                 print(note)
+            if sched.phase != was:
+                events.append({"epoch": epoch + 1, "from": was,
+                               "to": sched.phase,
+                               "note": note.splitlines()[0] if note else ""})
             if phase == "warmup" and sched.phase == "adapt":
                 # Estimate the target prior *here*, from the warm-up-best model:
                 # it is the last point at which the classifier is purely
@@ -983,7 +1120,7 @@ def run_training(
                 # the target terms come on. Start the adapt stage clean.
                 optimizer = _make_optimizer(model, cfg)
 
-    _report_selection(history, criterion, best_epoch)
+    _report_selection(history, criterion, best_epoch, val_label)
 
     if best_state is not None:
         print(f"Restoring checkpoint from epoch {best_epoch} "
@@ -991,17 +1128,100 @@ def run_training(
         model.load_state_dict(best_state)
 
     # Everything the caller needs to score the final model exactly the way the
-    # training loop did (same prediction mode, same prior correction).
+    # training loop did (same prediction mode, same prior correction), plus the
+    # trace the artefact/figure layer saves (`src/run_artifacts.py`).
+    oracle = max(history, key=lambda r: r["tgt_f1"]) if history else None
     return model, {
         "src_prior": src_prior,
         "tgt_prior": tgt_prior if cfg.prior_correct_eval else None,
         "src_caches": src_caches,
         "tgt_cache": tgt_cache,
         "s_global": s_global,
+        "history": history,
+        "events": events,
+        "selection": selection_trace,
+        "support": support_stats,
+        "best_epoch": best_epoch,
+        "oracle_epoch": oracle["epoch"] if oracle else None,
+        "criterion": criterion,
+        "val_label": val_label,
+        "proto_chance": math.log(num_classes),
+        "struct_density": struct_density,
+        "class_weights": class_weights,
     }
 
 
-def _report_selection(history: List[dict], criterion: str, best_epoch) -> None:
+@torch.no_grad()
+def summarize_run(
+    model: FGWPrototypeDA,
+    sources: List[Data],
+    target: Data,
+    cfg: FGWConfig,
+    ctx: dict,
+    seed: int,
+    name_width: int = 5,
+) -> dict:
+    """Score every graph, print the per-seed table, and return the full record.
+
+    Shared by all five runners so the printed table, the saved `metrics.json`
+    and the figures can never disagree. The returned dict is what
+    `src/plots.py` renders: final scores, the training trace from `ctx`, and
+    the target-side detail (per-class F1, confusion, true label prior) that
+    only exists once the run is over.
+    """
+    from sklearn.metrics import confusion_matrix, f1_score
+
+    dev_sources = [s.to(cfg.device) for s in sources]
+    dev_target = target.to(cfg.device)
+
+    print("\n" + "-" * 60)
+    print(f"  Seed {seed} results")
+    print("-" * 60)
+    source_scores = {}
+    for name, g, cache in zip(cfg.source_domains, dev_sources, ctx["src_caches"]):
+        s = evaluate(model, g, cfg=cfg, cache=cache)
+        source_scores[name] = {k: float(s[k]) for k in ("acc", "auc", "f1")}
+        print(f"  Source {name:>{name_width}}: ACC {s['acc']:.4f}  "
+              f"AUROC {s['auc']:.4f}  MacroF {s['f1']:.4f}")
+    tgt = evaluate(
+        model, dev_target, cfg=cfg, cache=ctx["tgt_cache"],
+        source_prior=ctx["src_prior"], target_prior=ctx["tgt_prior"],
+    )
+    print(f"  Target {cfg.target_domain:>{name_width}}: ACC {tgt['acc']:.4f}  "
+          f"AUROC {tgt['auc']:.4f}  MacroF {tgt['f1']:.4f}")
+
+    logits = predict_logits(model, dev_target, cfg=cfg, cache=ctx["tgt_cache"])
+    if ctx["tgt_prior"] is not None:
+        logits = prior_corrected_logits(logits, ctx["src_prior"], ctx["tgt_prior"])
+    pred = logits.argmax(dim=1).cpu().numpy()
+    true = dev_target.y.cpu().numpy()
+    labels = list(range(cfg.num_classes))
+
+    rec = {
+        "seed": seed,
+        **{k: float(tgt[k]) for k in ("acc", "auc", "f1")},
+        "loss": float(tgt.get("loss", float("nan"))),
+        "source_scores": source_scores,
+        "per_class_f1": f1_score(true, pred, average=None, labels=labels,
+                                 zero_division=0).tolist(),
+        "per_class_support": np.bincount(
+            true, minlength=cfg.num_classes).tolist(),
+        "confusion": confusion_matrix(true, pred, labels=labels).tolist(),
+        "src_prior": ctx["src_prior"].cpu().tolist(),
+        "tgt_true_prior": (
+            np.bincount(true, minlength=cfg.num_classes) / max(len(true), 1)
+        ).tolist(),
+    }
+    for key in ("history", "events", "selection", "support", "best_epoch",
+                "oracle_epoch", "criterion", "val_label", "proto_chance",
+                "struct_density"):
+        rec[key] = ctx.get(key)
+    return rec
+
+
+def _report_selection(
+    history: List[dict], criterion: str, best_epoch, val_label: str = "src_val_f1",
+) -> None:
     """Print what each criterion picks and what it costs against the oracle.
 
     The oracle row selects on target macro-F1 and is *not* a usable criterion —
@@ -1017,7 +1237,7 @@ def _report_selection(history: List[dict], criterion: str, best_epoch) -> None:
     print("-" * 60)
     print(f"  {'criterion':<12}{'epoch':>7}{'score':>10}{'tgt MacroF':>13}"
           f"{'vs oracle':>11}")
-    for name, key in (("src_val_f1", "src_val"), ("SND", "snd"),
+    for name, key in ((val_label, "src_val"), ("SND", "snd"),
                       ("neg_entropy", "neg_ent")):
         usable = [r for r in history if r[key] == r[key]]
         if not usable:

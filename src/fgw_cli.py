@@ -26,8 +26,12 @@ def add_method_args(parser: argparse.ArgumentParser, **defaults) -> None:
                    help="fraction of source nodes whose labels are revealed to "
                         "the supervised loss; the rest stay in the graph but "
                         "their labels are hidden. 1.0 = full supervision")
-    g.add_argument("--source_label_stratified", action="store_true",
-                   help="draw the labeled subset per-class instead of at random")
+    g.add_argument("--source_label_stratified",
+                   action=argparse.BooleanOptionalAction,
+                   default=d("source_label_stratified", False),
+                   help="draw the labeled subset per-class instead of at "
+                        "random; on a long-tailed label set a pure random 10%% "
+                        "draw leaves whole classes with no supervision at all")
     g.add_argument("--source_val_frac", type=float,
                    default=d("source_val_frac", 0.2),
                    help="fraction of the revealed source labels held out of the "
@@ -36,6 +40,24 @@ def add_method_args(parser: argparse.ArgumentParser, **defaults) -> None:
                    default=d("model_selection", "src_val"),
                    choices=["src_val", "snd", "entropy", "last"],
                    help="checkpoint criterion (target labels are never used)")
+    g.add_argument("--val_metric", type=str, default=d("val_metric", "auto"),
+                   choices=["auto", "f1", "acc"],
+                   help="what the held-out source split is scored by, for both "
+                        "checkpoint selection and the warm-up plateau test. "
+                        "'auto' falls back from macro-F1 to accuracy when the "
+                        "split is too small to estimate C per-class F1 scores")
+
+    g = parser.add_argument_group("run artefacts")
+    g.add_argument("--out_dir", type=str, default=d("out_dir", "runs"),
+                   help="where each run's own numbered folder is created "
+                        "(log, config, history.csv, metrics.json, figures/)")
+    g.add_argument("--no_figures", action="store_true",
+                   help="save the log and the CSV/JSON but skip the figures")
+    g.add_argument("--no_save", action="store_true",
+                   help="do not create a run folder at all")
+    g.add_argument("--note", type=str, default="",
+                   help="free-text note stored in config.json and index.csv, "
+                        "e.g. --note 'ablation: no kNN augmentation'")
 
     g = parser.add_argument_group("optimisation")
     g.add_argument("--epochs", type=int, default=d("epochs", 350))
@@ -75,6 +97,17 @@ def add_method_args(parser: argparse.ArgumentParser, **defaults) -> None:
     g.add_argument("--proto_size", type=int, default=d("proto_size", 8),
                    help="n_p; too large and the entropic plan stays diffuse, "
                         "making every class equidistant from every ego-graph")
+    g.add_argument("--knn_augment", type=int, default=d("knn_augment", 0),
+                   metavar="K",
+                   help="add K feature-space kNN edges to every node with "
+                        "degree < --knn_min_degree, on the sources and the "
+                        "target alike (labels are never read). 0 = off. Meant "
+                        "for the induced-subgraph splits (Cora_full, Arxiv) "
+                        "where 32-50%% of nodes are isolated and neither the "
+                        "GCN nor the ego-graph has anything to work with")
+    g.add_argument("--knn_min_degree", type=int, default=d("knn_min_degree", 3),
+                   help="degree below which a node counts as low-degree for "
+                        "--knn_augment")
     g.add_argument("--num_protos", type=int, default=d("num_protos", 3))
     g.add_argument("--fgw_alpha", type=float, default=d("fgw_alpha", 0.25))
     g.add_argument("--fgw_epsilon", type=float, default=d("fgw_epsilon", 0.05))
@@ -97,6 +130,16 @@ def add_method_args(parser: argparse.ArgumentParser, **defaults) -> None:
                         "the nearest wrong one; this is what makes the "
                         "prototypes class-discriminative at all")
     g.add_argument("--fgw_margin", type=float, default=d("fgw_margin", 0.5))
+    g.add_argument("--class_weighted_ce", action=argparse.BooleanOptionalAction,
+                   default=d("class_weighted_ce", False),
+                   help="inverse-frequency class weights on the supervised "
+                        "source terms. Plain CE optimises accuracy; on a "
+                        "long-tailed label set that leaves macro-F1 — the "
+                        "headline metric — paying for the tail")
+    g.add_argument("--class_weight_power", type=float,
+                   default=d("class_weight_power", 0.5),
+                   help="exponent on the inverse frequency (1.0 = full, "
+                        "0.5 = square-root, the usual better trade)")
     g.add_argument("--im_balance_weight", type=float,
                    default=d("im_balance_weight", 1.0),
                    help="weight on the class-balance half of IM; 0 turns IM into "
@@ -169,10 +212,15 @@ def method_kwargs(args) -> dict:
     """Translate parsed args into `FGWConfig` keyword arguments."""
     head_hidden = args.head_hidden if args.head_hidden is not None else args.hidden_dim
     return dict(
+        out_dir=args.out_dir,
+        no_figures=args.no_figures,
+        no_save=args.no_save,
+        note=args.note,
         source_label_ratio=args.source_label_ratio,
         source_label_stratified=args.source_label_stratified,
         source_val_frac=args.source_val_frac,
         model_selection=args.model_selection,
+        val_metric=args.val_metric,
         epochs=args.epochs,
         lr=args.lr,
         weight_decay=args.weight_decay,
@@ -190,6 +238,8 @@ def method_kwargs(args) -> dict:
         ego_size=args.ego_size,
         proto_size=args.proto_size,
         num_protos=args.num_protos,
+        knn_augment=args.knn_augment,
+        knn_min_degree=args.knn_min_degree,
         fgw_alpha=args.fgw_alpha,
         fgw_epsilon=args.fgw_epsilon,
         tau=args.tau,
@@ -202,6 +252,8 @@ def method_kwargs(args) -> dict:
         lambda_fgw_margin=args.lambda_fgw_margin,
         fgw_margin=args.fgw_margin,
         im_balance_weight=args.im_balance_weight,
+        class_weighted_ce=args.class_weighted_ce,
+        class_weight_power=args.class_weight_power,
         lambda_vrex=args.lambda_vrex,
         lambda_struct=args.lambda_struct,
         struct_density=args.struct_density,

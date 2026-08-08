@@ -296,8 +296,14 @@ def mean_ego_structure(caches: list) -> float:
     `mean(C_ego)`. Without that calibration the FGW structural term compares
     two matrices living on different scales and degenerates into a
     class-independent constant offset.
+
+    Only the *reached* slots count. Unreached ones are filled with 1 and carry
+    no transport mass, so averaging over them measures the padding rather than
+    the data: on Cora_full it pulled the mean from ~0.45 to 0.84 and calibrated
+    the prototypes to a near-empty density of 0.16, wiping out the structural
+    half of the FGW cost on the very dataset that needed it.
     """
-    tot, n = 0.0, 0
+    tot, n = 0.0, 0.0
     for c in caches:
         if c is None or c._struct_dev is None:
             continue
@@ -305,7 +311,14 @@ def mean_ego_structure(caches: list) -> float:
         k = C.size(-1)
         if k < 2:
             continue
-        off = (C.sum(dim=(-1, -2))) / (k * (k - 1))
-        tot += float(off.sum())
-        n += off.numel()
+        if c._mask_dev is None:
+            tot += float(C.sum())
+            n += float(C.size(0) * k * (k - 1))
+            continue
+        m = c._mask_dev.to(C.dtype)                       # (S, k)
+        pair = m.unsqueeze(-1) * m.unsqueeze(-2)          # (S, k, k)
+        eye = torch.eye(k, device=C.device, dtype=C.dtype)
+        pair = pair * (1.0 - eye)                         # off-diagonal only
+        tot += float((C * pair).sum())
+        n += float(pair.sum())
     return tot / n if n else 0.5

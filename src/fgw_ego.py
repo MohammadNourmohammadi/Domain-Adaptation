@@ -8,6 +8,33 @@ neighbour lists / shortest-path matrices across all epochs.
 
 Embeddings are looked up at every step (they change every iteration),
 so the cache only holds the structural pieces.
+
+**Support masking.** A seed whose connected component holds fewer than k
+nodes has no k-th neighbour: PPR scores every unreachable node exactly 0,
+and `torch.topk` then breaks the all-zero tie by index order, so the
+ego-graph gets padded with the lowest-numbered nodes of the graph — the
+*same* padding for every such seed, with an all-disconnected (hence
+constant) shortest-path matrix. Measured share of ego-graphs that PPR
+fills completely:
+
+    Twitch      100%   (no node has fewer than k reachable neighbours)
+    Citation  77-86%
+    Arxiv     30-82%   (Y5, the target: 51%, of which 36% are isolated)
+    Cora_full 22-46%   (W5, the target: 30%, of which 42% are isolated)
+
+So on the two induced-subgraph splits the majority of ego-graphs were a
+fixed set of strangers, and the FGW distance stopped depending on which
+node it was computed for.
+
+Every ego therefore carries a boolean `mask`: True for the seed and for
+neighbours PPR actually reached. Invalid slots are given **zero
+probability mass**, which is the principled fix rather than a hack — FGW
+compares measures, and a measure may put no mass on a point. The solver
+then transports nothing through them and they contribute nothing to the
+distance or its gradient. A fully isolated seed degenerates to a
+one-point ego-graph (a pure feature distance), which is the honest
+answer. When every slot is valid the masked path is numerically
+identical to the old one, so the dense datasets are unaffected.
 """
 
 import numpy as np
@@ -48,6 +75,9 @@ class EgoGraphCache:
 
         self._nbrs_dev: torch.Tensor = None
         self._struct_dev: torch.Tensor = None
+        # (S, k) bool: which slots PPR actually reached (slot 0, the seed, is
+        # always True). See the module docstring.
+        self._mask_dev: torch.Tensor = None
         # Maps a full-graph node id -> its row in the compact cached tensors.
         # None means "every node was precomputed" (rows are node ids directly).
         self._row_of: torch.Tensor = None
@@ -72,26 +102,66 @@ class EgoGraphCache:
             p = (1.0 - self.ppr_alpha) * torch.sparse.mm(P, p) + self.ppr_alpha * e
         return p.t()  # (B, N)
 
-    def _topk_neighbours(self, seeds: torch.Tensor) -> torch.Tensor:
-        scores = self._ppr_batch(seeds)
-        seed_rows = torch.arange(seeds.numel(), device=seeds.device)
-        scores[seed_rows, seeds] = -float("inf")  # exclude the seed itself
-        _, top_idx = torch.topk(scores, k=self.k - 1, dim=1)
-        return torch.cat([seeds.view(-1, 1), top_idx], dim=1)  # (B, k)
+    def _topk_neighbours(self, seeds: torch.Tensor) -> tuple:
+        """(nbrs, mask) of shape (B, k): node ids and which of them are real.
 
-    def _structure_matrix(self, nbrs_1d: np.ndarray) -> np.ndarray:
+        A neighbour is real only when PPR gave it strictly positive mass.
+        Everything else is an artefact of `topk` breaking an all-zero tie, and
+        is marked invalid so `build_ego_batch_from_cache` can give it no mass.
+        """
+        scores = self._ppr_batch(seeds)
+        B = seeds.numel()
+        seed_rows = torch.arange(B, device=seeds.device)
+        scores[seed_rows, seeds] = -float("inf")  # exclude the seed itself
+        # Graphs smaller than k cannot fill the ego-graph; pad with the seed
+        # itself and mark the padding invalid.
+        want = min(self.k - 1, max(self.num_nodes - 1, 0))
+        if want > 0:
+            top_val, top_idx = torch.topk(scores, k=want, dim=1)
+            valid = top_val > 0.0
+        else:
+            top_idx = seeds.new_zeros((B, 0))
+            valid = torch.zeros((B, 0), dtype=torch.bool, device=seeds.device)
+        pad = self.k - 1 - want
+        if pad > 0:
+            top_idx = torch.cat([top_idx, seeds.view(-1, 1).expand(B, pad)], dim=1)
+            valid = torch.cat(
+                [valid, torch.zeros((B, pad), dtype=torch.bool, device=seeds.device)],
+                dim=1,
+            )
+        nbrs = torch.cat([seeds.view(-1, 1), top_idx], dim=1)          # (B, k)
+        mask = torch.cat(
+            [torch.ones((B, 1), dtype=torch.bool, device=seeds.device), valid], dim=1,
+        )
+        return nbrs, mask
+
+    def _structure_matrix(self, nbrs_1d: np.ndarray, mask_1d: np.ndarray) -> np.ndarray:
         # Normalise by the ego graph's *own* diameter, not by k. Dividing by k
         # collapses near-clique neighbourhoods (avg degree >> 1) into a tiny
         # {0, 1/k, 2/k} band with no spread, so C_ego (mean ~0.04) never lands
         # on the same [0,1] scale as the prototype C_p (mean ~0.5) and the FGW
         # structural term degenerates into a class-independent constant.
-        sub = self._A_scipy[nbrs_1d, :][:, nbrs_1d]
+        #
+        # Only the *reached* slots take part: the diameter that sets the scale
+        # has to come from the real neighbourhood, otherwise one unreachable
+        # padding node makes every distance in the ego-graph disconnected and
+        # the matrix collapses to a constant 1. Invalid rows/columns are filled
+        # with 1 (they carry no mass, so the value is inert).
+        k = int(mask_1d.size)
+        out = np.ones((k, k), dtype=np.float32)
+        np.fill_diagonal(out, 0.0)
+        valid = np.flatnonzero(mask_1d)
+        if valid.size < 2:                      # isolated seed: nothing to relate
+            return out
+        idx = nbrs_1d[valid]
+        sub = self._A_scipy[idx, :][:, idx]
         d = shortest_path(sub, directed=False, unweighted=True)
         finite = d[np.isfinite(d)]
         diam = float(finite.max()) if finite.size else 1.0
         fill = diam + 1.0                       # disconnected = one hop past diameter
         d = np.where(np.isinf(d), fill, d) / max(fill, 1.0)
-        return d.astype(np.float32)             # spans [0, 1] with real spread
+        out[np.ix_(valid, valid)] = d.astype(np.float32)
+        return out                              # spans [0, 1] with real spread
 
     # ------------------------------------------------------------- precompute
     def precompute_all(
@@ -132,19 +202,38 @@ class EgoGraphCache:
         S = seeds_all.numel()
         all_nbrs = torch.empty(S, k, dtype=torch.long)
         all_C = torch.empty(S, k, k, dtype=torch.float32)
+        all_mask = torch.empty(S, k, dtype=torch.bool)
 
         for start in range(0, S, batch_size):
             end = min(start + batch_size, S)
             seeds = seeds_all[start:end]
-            nbrs = self._topk_neighbours(seeds).detach()
+            nbrs, mask = self._topk_neighbours(seeds)
+            nbrs, mask = nbrs.detach(), mask.detach()
             all_nbrs[start:end] = nbrs
-            nbrs_np = nbrs.numpy()
+            all_mask[start:end] = mask
+            nbrs_np, mask_np = nbrs.numpy(), mask.numpy()
             for i in range(end - start):
-                d = self._structure_matrix(nbrs_np[i])  # already normalised to [0,1]
+                # already normalised to [0,1] over the reached slots
+                d = self._structure_matrix(nbrs_np[i], mask_np[i])
                 all_C[start + i] = torch.from_numpy(d)
 
         self._nbrs_dev = all_nbrs.to(device)
         self._struct_dev = all_C.to(device)
+        self._mask_dev = all_mask.to(device)
+
+    # ------------------------------------------------------------ diagnostics
+    def support_stats(self) -> dict:
+        """How much of the ego-graphs is real. Cheap; used for the run header."""
+        if self._mask_dev is None:
+            return {}
+        m = self._mask_dev
+        sizes = m.sum(dim=1).float()
+        return {
+            "mean_support": float(sizes.mean()),
+            "frac_full": float((sizes >= self.k).float().mean()),
+            "frac_singleton": float((sizes <= 1).float().mean()),
+            "k": self.k,
+        }
 
 
 def build_ego_batch_from_cache(
@@ -159,7 +248,9 @@ def build_ego_batch_from_cache(
     Returns:
         F : (B, k, d + 1)   – encoder embeddings + anchor indicator coord
         C : (B, k, k)       – pairwise shortest-path distances on [0, 1]
-        h : (B, k)          – probability simplex mass (centre is boosted)
+        h : (B, k)          – probability simplex mass (centre is boosted,
+                              unreached slots get zero — see the module
+                              docstring)
     """
     device = embeddings.device
     k = cache.k
@@ -175,7 +266,15 @@ def build_ego_batch_from_cache(
     anchor[:, 0, 0] = anchor_weight
     F_ = torch.cat([F_emb, anchor], dim=-1)  # (B, k, d+1)
 
-    h_ = embeddings.new_full((B, k), 1.0 / k)
+    # Uniform over the slots PPR actually reached, zero on the rest. With a
+    # fully-reached ego-graph this is exactly the old `1/k` vector, so nothing
+    # changes on the dense datasets.
+    if cache._mask_dev is None:
+        h_ = embeddings.new_full((B, k), 1.0 / k)
+    else:
+        m = cache._mask_dev[rows].to(embeddings.dtype)          # (B, k)
+        h_ = m / m.sum(dim=1, keepdim=True).clamp_min(1.0)
+    h_ = h_.clone()
     h_[:, 0] = h_[:, 0] + anchor_mass_extra
     h_ = h_ / h_.sum(dim=1, keepdim=True)
 

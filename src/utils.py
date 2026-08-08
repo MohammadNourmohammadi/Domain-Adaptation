@@ -1,9 +1,23 @@
 import random
+import warnings
 
 import numpy as np
 import torch
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 from torch.autograd import Function
+
+# sklearn warns "number of unique classes is greater than 50% of the number of
+# samples — `y` could represent a regression problem" whenever a batch has more
+# classes than it comfortably supports. On Cora_full (70 classes, 32-128 nodes
+# per training batch) that fires on every single metric call and buries the log:
+# a 6-epoch smoke run produced 324 warning lines against 348 of real output.
+# The heuristic is simply wrong here — these are genuinely 70-class labels — so
+# the warning carries no information for this pipeline.
+warnings.filterwarnings(
+    "ignore",
+    message="The number of unique classes is greater than 50%",
+    category=UserWarning,
+)
 
 
 class _GradReverse(Function):

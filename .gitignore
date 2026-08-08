@@ -212,10 +212,23 @@ data/citation/
 # Large Yelp dump, GLOVE vectors, and cached city graphs (not versioned)
 data/yelp/raw/
 data/yelp/glove/
-data/yelp/*/processed_fgw.pt
+# The loader encodes its build parameters in the filename
+# (processed_fgw_r<min_common_reviewers>_u<max_user_degree>.pt), so the bare
+# name only covers caches written by an older revision.
+data/yelp/*/processed_fgw*.pt
 
 # ogbn-arxiv archive, unpacked CSVs and parsed .npy cache (~250 MB, re-downloadable)
 data/arxiv/
 
 # Cora_full archive (12 MB, re-downloadable)
 data/cora_full/
+
+# NOTE: `runs/` is deliberately NOT ignored. Training happens on a GPU server,
+# so committing each run's folder (log.txt, config.json, history.csv,
+# metrics.json, trace.json, figures/*.png — see src/run_artifacts.py) is how the
+# results and paper figures get back to a laptop, and it keeps every figure tied
+# to the exact config and log that produced it.
+#
+# They are small (a few hundred KB per run) but they do accumulate. If the repo
+# ever gets heavy, delete old run folders rather than ignoring the directory —
+# `runs/index.csv` alone still records that the run happened and what it scored.
