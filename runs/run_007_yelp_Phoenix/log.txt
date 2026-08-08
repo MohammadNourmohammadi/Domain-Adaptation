@@ -1,0 +1,183 @@
+============================================================
+  FGW prototype-graph Domain Adaptation  (Yelp)
+============================================================
+  Sources       : ['Madison', 'Glendale', 'Gilbert', 'LasVegas', 'Toronto']
+  Target        : Phoenix
+  Source labels : 10% (random draw; target 0%)
+  Selection     : src_val (20% of source labels held out)
+  Device        : cuda
+  feature_dim   : 100
+  num_classes   : 5
+  proj/hidden   : 128 / 64  (frozen SVD basis)
+  schedule      : warmup <= 150 (patience 40) -> adapt 120 -> refine, of 300 epochs
+  ego_size k    : 16
+  proto_size n_p: 8  (M=3 per class)
+  fgw alpha,eps : 0.5, 0.05
+  head/LN       : 64 / True
+  mode          : FGW domain adaptation
+============================================================
+
+Loading data ...
+  [Madison] cache missing -> building all Yelp city graphs (one-time, streams the raw dump)
+  [yelp] loading GLOVE vectors from data/yelp/glove/glove.6B.100d.txt ...
+  [yelp] loaded 400,001 GLOVE vectors (dim=100)
+  [yelp] scanning businesses ...
+  [yelp] streaming business from data/yelp/raw/yelp_dataset.tgz::yelp_academic_dataset_business.json
+  [yelp] kept POIs per city: {'Madison': 2442, 'Glendale': 2396, 'Gilbert': 2326, 'LasVegas': 19574, 'Toronto': 13994, 'Phoenix': 12721}
+  [yelp] streaming reviews (this is the big one) ...
+  [yelp] streaming review from data/yelp/raw/yelp_dataset.tgz::yelp_academic_dataset_review.json
+    ... 1,000,000 reviews scanned
+    ... 2,000,000 reviews scanned
+    ... 3,000,000 reviews scanned
+    ... 4,000,000 reviews scanned
+    ... 5,000,000 reviews scanned
+  [yelp] finished streaming 5,261,669 reviews
+  [yelp] Madison: 2442 POIs, 6930 undirected edges, avg degree 5.7 -> cached data/yelp/Madison/processed_fgw_r3_u20.pt
+  [yelp] Glendale: 2396 POIs, 4315 undirected edges, avg degree 3.6 -> cached data/yelp/Glendale/processed_fgw_r3_u20.pt
+  [yelp] Gilbert: 2326 POIs, 8244 undirected edges, avg degree 7.1 -> cached data/yelp/Gilbert/processed_fgw_r3_u20.pt
+  [yelp] LasVegas: 19574 POIs, 108455 undirected edges, avg degree 11.1 -> cached data/yelp/LasVegas/processed_fgw_r3_u20.pt
+  [yelp] Toronto: 13994 POIs, 12961 undirected edges, avg degree 1.9 -> cached data/yelp/Toronto/processed_fgw_r3_u20.pt
+  [yelp] Phoenix: 12721 POIs, 33943 undirected edges, avg degree 5.3 -> cached data/yelp/Phoenix/processed_fgw_r3_u20.pt
+  Madison: 2442 nodes, 13860 edges, labels [0:1358 1:596 2:310 3:153 4:25]
+  Glendale: 2396 nodes, 8630 edges, labels [0:914 1:546 2:487 3:392 4:57]
+  Gilbert: 2326 nodes, 16488 edges, labels [0:728 1:443 2:626 3:456 4:73]
+  LasVegas: 19574 nodes, 216910 edges, labels [0:8588 1:4189 2:3867 3:2427 4:503]
+  Toronto: 13994 nodes, 25922 edges, labels [0:9700 1:2661 2:778 3:778 4:77]
+  Phoenix (target): 12721 nodes, 67886 edges, labels [0:5028 1:2587 2:3138 3:1672 4:296]
+
+Model parameters: 25,669
+
+Training ...
+
+Frozen SVD input projection: 100 -> 128 (fitted on 53453 unlabeled nodes, 12,800 trainable params removed)
+Supervision budget: 10% source labels (random draw, 20% held out for selection) -> train+val nodes [Madison 195+49v/2442, Glendale 192+48v/2396, Gilbert 186+47v/2326, LasVegas 1566+391v/19574, Toronto 1119+280v/13994]
+Precomputing PPR ego-graphs (sources: 3258 labeled seeds, target: 12721 nodes) ...
+/home/ubuntu/Domain-Adaptation/src/fgw_ego.py:87: UserWarning: Sparse invariant checks are implicitly disabled. Memory errors (e.g. SEGFAULT) will occur when operating on a sparse tensor which violates the invariants, but checks incur performance overhead. To silence this warning, explicitly opt in or out. See `torch.sparse.check_sparse_tensor_invariants.__doc__` for guidance.  (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/Context.cpp:816.)
+  return torch.sparse_coo_tensor(
+  ego support Madison: mean 4.7/16 nodes, 25% full, 75% isolated
+  ego support Glendale: mean 4.4/16 nodes, 22% full, 78% isolated
+  ego support Gilbert: mean 4.9/16 nodes, 26% full, 74% isolated
+  ego support LasVegas: mean 4.5/16 nodes, 23% full, 76% isolated
+  ego support Toronto: mean 3.5/16 nodes, 17% full, 83% isolated
+  ego support Phoenix: mean 3.9/16 nodes, 19% full, 80% isolated
+Prototype density calibrated to 0.527 (mean C_ego = 0.473)
+Class prior: source [0.520, 0.203, 0.158, 0.103, 0.017] | target [0.520, 0.203, 0.158, 0.103, 0.017] [source prior (--estimate_prior to run BBSE)]; IM balance x2.46
+Held-out source split scored by macro-F1 (815 held-out nodes / 5 classes = 163.0 per class); this drives both the warm-up plateau test and checkpoint selection.
+Schedule: warmup until held-out source F1 plateau (EMA, patience 40, armed after 40), gated on L_proto <= 1.448, capped at 150 epochs; then 120 adapt epochs (ramp 20), then refine.
+Source selection: FGW transferability (s_global, s_local) refreshed every 20 epochs against 32 target ego-graphs.
+[fgw-scale] C_ego mean=0.500 std=0.170 (over reached pairs) | C_p mean=0.446 std=0.308 (target density 0.527)
+Epoch   1 [ warmup] loss 2.3467  cls 1.5711  pr 1.6049  mg 0.5099  al(w=0.00) 0.0000  ent 0.0000  sep 0.0387  vx 0.0015  pl 0.0000 | src_train_f1 0.1817  src_val_f1 0.1386 | snd 7.6004  tgt ACC 0.3950  AUROC 0.6441  MacroF 0.1133
+Epoch   5 [ warmup] loss 2.1951  cls 1.4255  pr 1.6012  mg 0.5049  al(w=0.00) 0.0000  ent 0.0000  sep 0.0363  vx 0.0066  pl 0.0000 | src_train_f1 0.1875  src_val_f1 0.1386 | snd 7.6004  tgt ACC 0.3953  AUROC 0.7475  MacroF 0.1133
+Epoch  10 [ warmup] loss 2.1369  cls 1.3715  pr 1.5976  mg 0.5048  al(w=0.00) 0.0000  ent 0.0000  sep 0.0333  vx 0.0200  pl 0.0000 | src_train_f1 0.1510  src_val_f1 0.1386 | snd 7.6003  tgt ACC 0.3953  AUROC 0.8131  MacroF 0.1133
+Epoch  15 [ warmup] loss 2.1329  cls 1.3724  pr 1.5933  mg 0.5029  al(w=0.00) 0.0000  ent 0.0000  sep 0.0305  vx 0.0274  pl 0.0000 | src_train_f1 0.1685  src_val_f1 0.1386 | snd 7.5999  tgt ACC 0.3953  AUROC 0.8654  MacroF 0.1133
+Epoch  20 [ warmup] loss 2.0772  cls 1.3214  pr 1.5887  mg 0.5015  al(w=0.00) 0.0000  ent 0.0000  sep 0.0279  vx 0.0141  pl 0.0000 | src_train_f1 0.1747  src_val_f1 0.1386 | snd 7.5983  tgt ACC 0.3953  AUROC 0.8878  MacroF 0.1133
+Epoch  25 [ warmup] loss 2.0405  cls 1.2897  pr 1.5823  mg 0.5005  al(w=0.00) 0.0000  ent 0.0000  sep 0.0254  vx 0.0271  pl 0.0000 | src_train_f1 0.1736  src_val_f1 0.1386 | snd 7.5894  tgt ACC 0.3953  AUROC 0.8965  MacroF 0.1133
+Epoch  30 [ warmup] loss 1.9969  cls 1.2503  pr 1.5757  mg 0.5005  al(w=0.00) 0.0000  ent 0.0000  sep 0.0231  vx 0.0173  pl 0.0000 | src_train_f1 0.1902  src_val_f1 0.1386 | snd 7.5538  tgt ACC 0.3953  AUROC 0.8930  MacroF 0.1133
+Epoch  35 [ warmup] loss 1.9207  cls 1.1787  pr 1.5686  mg 0.4999  al(w=0.00) 0.0000  ent 0.0000  sep 0.0210  vx 0.0220  pl 0.0000 | src_train_f1 0.2262  src_val_f1 0.1419 | snd 7.4247  tgt ACC 0.4002  AUROC 0.8903  MacroF 0.1216
+Epoch  40 [ warmup] loss 1.8363  cls 1.0999  pr 1.5608  mg 0.4977  al(w=0.00) 0.0000  ent 0.0000  sep 0.0189  vx 0.0135  pl 0.0000 | src_train_f1 0.2590  src_val_f1 0.2491 | snd 7.1336  tgt ACC 0.5284  AUROC 0.8920  MacroF 0.2539
+Epoch  45 [ warmup] loss 1.6768  cls 0.9490  pr 1.5491  mg 0.4913  al(w=0.00) 0.0000  ent 0.0000  sep 0.0169  vx 0.0111  pl 0.0000 | src_train_f1 0.3801  src_val_f1 0.3146 | snd 6.8672  tgt ACC 0.6245  AUROC 0.9226  MacroF 0.3225
+Epoch  50 [ warmup] loss 1.5029  cls 0.7831  pr 1.5389  mg 0.4844  al(w=0.00) 0.0000  ent 0.0000  sep 0.0155  vx 0.0263  pl 0.0000 | src_train_f1 0.4855  src_val_f1 0.4306 | snd 6.7306  tgt ACC 0.6718  AUROC 0.9181  MacroF 0.4149
+Epoch  55 [ warmup] loss 1.4232  cls 0.7077  pr 1.5368  mg 0.4798  al(w=0.00) 0.0000  ent 0.0000  sep 0.0141  vx 0.0315  pl 0.0000 | src_train_f1 0.4929  src_val_f1 0.5869 | snd 6.5881  tgt ACC 0.7586  AUROC 0.9167  MacroF 0.5758
+Epoch  60 [ warmup] loss 1.3831  cls 0.6748  pr 1.5282  mg 0.4731  al(w=0.00) 0.0000  ent 0.0000  sep 0.0128  vx 0.0245  pl 0.0000 | src_train_f1 0.5340  src_val_f1 0.6375 | snd 6.4847  tgt ACC 0.8032  AUROC 0.9237  MacroF 0.6291
+Epoch  65 [ warmup] loss 1.3098  cls 0.6066  pr 1.5189  mg 0.4707  al(w=0.00) 0.0000  ent 0.0000  sep 0.0117  vx 0.0176  pl 0.0000 | src_train_f1 0.6120  src_val_f1 0.6394 | snd 6.3702  tgt ACC 0.8066  AUROC 0.9328  MacroF 0.6294
+Epoch  70 [ warmup] loss 1.2815  cls 0.5857  pr 1.5094  mg 0.4636  al(w=0.00) 0.0000  ent 0.0000  sep 0.0108  vx 0.0280  pl 0.0000 | src_train_f1 0.5837  src_val_f1 0.6544 | snd 6.2957  tgt ACC 0.8190  AUROC 0.9447  MacroF 0.6458
+Epoch  75 [ warmup] loss 1.1542  cls 0.4702  pr 1.4938  mg 0.4509  al(w=0.00) 0.0000  ent 0.0000  sep 0.0099  vx 0.0246  pl 0.0000 | src_train_f1 0.7209  src_val_f1 0.6563 | snd 6.2083  tgt ACC 0.8282  AUROC 0.9508  MacroF 0.6501
+Epoch  80 [ warmup] loss 1.1162  cls 0.4385  pr 1.4842  mg 0.4456  al(w=0.00) 0.0000  ent 0.0000  sep 0.0091  vx 0.0206  pl 0.0000 | src_train_f1 0.6728  src_val_f1 0.6722 | snd 6.1981  tgt ACC 0.8306  AUROC 0.9558  MacroF 0.6578
+Epoch  85 [ warmup] loss 1.0956  cls 0.4273  pr 1.4677  mg 0.4383  al(w=0.00) 0.0000  ent 0.0000  sep 0.0083  vx 0.0137  pl 0.0000 | src_train_f1 0.6948  src_val_f1 0.6684 | snd 6.1709  tgt ACC 0.8386  AUROC 0.9582  MacroF 0.6590
+Epoch  90 [ warmup] loss 1.0888  cls 0.4215  pr 1.4668  mg 0.4384  al(w=0.00) 0.0000  ent 0.0000  sep 0.0076  vx 0.0197  pl 0.0000 | src_train_f1 0.7450  src_val_f1 0.6720 | snd 6.1593  tgt ACC 0.8423  AUROC 0.9605  MacroF 0.6672
+Epoch  95 [ warmup] loss 1.0598  cls 0.3977  pr 1.4602  mg 0.4332  al(w=0.00) 0.0000  ent 0.0000  sep 0.0069  vx 0.0120  pl 0.0000 | src_train_f1 0.7151  src_val_f1 0.6929 | snd 6.1587  tgt ACC 0.8470  AUROC 0.9633  MacroF 0.6702
+Epoch 100 [ warmup] loss 1.0437  cls 0.3845  pr 1.4551  mg 0.4317  al(w=0.00) 0.0000  ent 0.0000  sep 0.0064  vx 0.0130  pl 0.0000 | src_train_f1 0.7235  src_val_f1 0.6756 | snd 6.1438  tgt ACC 0.8433  AUROC 0.9638  MacroF 0.6672
+Epoch 105 [ warmup] loss 1.0165  cls 0.3612  pr 1.4492  mg 0.4284  al(w=0.00) 0.0000  ent 0.0000  sep 0.0059  vx 0.0133  pl 0.0000 | src_train_f1 0.7321  src_val_f1 0.6817 | snd 6.1535  tgt ACC 0.8510  AUROC 0.9658  MacroF 0.6752
+Epoch 110 [ warmup] loss 0.9981  cls 0.3513  pr 1.4375  mg 0.4196  al(w=0.00) 0.0000  ent 0.0000  sep 0.0053  vx 0.0174  pl 0.0000 | src_train_f1 0.7371  src_val_f1 0.6853 | snd 6.1517  tgt ACC 0.8498  AUROC 0.9669  MacroF 0.6741
+Epoch 115 [ warmup] loss 0.9573  cls 0.3144  pr 1.4309  mg 0.4170  al(w=0.00) 0.0000  ent 0.0000  sep 0.0046  vx 0.0080  pl 0.0000 | src_train_f1 0.7031  src_val_f1 0.6834 | snd 6.1591  tgt ACC 0.8530  AUROC 0.9675  MacroF 0.6778
+Epoch 120 [ warmup] loss 0.9512  cls 0.3138  pr 1.4228  mg 0.4119  al(w=0.00) 0.0000  ent 0.0000  sep 0.0041  vx 0.0065  pl 0.0000 | src_train_f1 0.7019  src_val_f1 0.6899 | snd 6.1374  tgt ACC 0.8517  AUROC 0.9684  MacroF 0.6858
+Epoch 125 [ warmup] loss 0.9105  cls 0.2769  pr 1.4166  mg 0.4088  al(w=0.00) 0.0000  ent 0.0000  sep 0.0037  vx 0.0033  pl 0.0000 | src_train_f1 0.7067  src_val_f1 0.6843 | snd 6.1477  tgt ACC 0.8536  AUROC 0.9686  MacroF 0.6884
+Epoch 130 [ warmup] loss 0.9424  cls 0.3158  pr 1.4066  mg 0.4015  al(w=0.00) 0.0000  ent 0.0000  sep 0.0034  vx 0.0059  pl 0.0000 | src_train_f1 0.6825  src_val_f1 0.6940 | snd 6.1445  tgt ACC 0.8558  AUROC 0.9692  MacroF 0.7005
+Epoch 135 [ warmup] loss 0.9013  cls 0.2764  pr 1.4045  mg 0.3999  al(w=0.00) 0.0000  ent 0.0000  sep 0.0031  vx 0.0106  pl 0.0000 | src_train_f1 0.7545  src_val_f1 0.7305 | snd 6.1518  tgt ACC 0.8572  AUROC 0.9694  MacroF 0.7028
+Epoch 140 [ warmup] loss 0.9760  cls 0.3464  pr 1.4086  mg 0.4073  al(w=0.00) 0.0000  ent 0.0000  sep 0.0029  vx 0.0117  pl 0.0000 | src_train_f1 0.7695  src_val_f1 0.7443 | snd 6.1379  tgt ACC 0.8546  AUROC 0.9687  MacroF 0.7229
+Epoch 145 [ warmup] loss 0.8958  cls 0.2773  pr 1.3924  mg 0.3953  al(w=0.00) 0.0000  ent 0.0000  sep 0.0026  vx 0.0073  pl 0.0000 | src_train_f1 0.7684  src_val_f1 0.7477 | snd 6.1369  tgt ACC 0.8550  AUROC 0.9694  MacroF 0.7180
+Epoch 150 [ warmup] loss 0.8776  cls 0.2633  pr 1.3882  mg 0.3899  al(w=0.00) 0.0000  ent 0.0000  sep 0.0024  vx 0.0103  pl 0.0000 | src_train_f1 0.7889  src_val_f1 0.7543 | snd 6.1333  tgt ACC 0.8560  AUROC 0.9697  MacroF 0.7142
+[phase] warmup -> adapt at epoch 151: warmup_epochs cap (150); rewound to the warm-up best (epoch 150, src_val 0.7543)
+  [select] Madison: w 0.66 (d 0.402)  Glendale: w 0.94 (d 0.367)  Gilbert: w 1.47 (d 0.322)  LasVegas: w 1.10 (d 0.352)  Toronto: w 0.83 (d 0.380)
+Epoch 155 [  adapt] loss 1.5604  cls 0.2122  pr 1.3263  mg 0.3477  al(w=0.47) 1.4081  ent 0.4880  sep 0.0021  vx 0.0074  pl 0.0000 | src_train_f1 0.7257  src_val_f1 0.6767 | snd 6.1277  tgt ACC 0.8414  AUROC 0.9682  MacroF 0.6844
+  [select] Madison: w 0.79 (d 0.376)  Glendale: w 1.02 (d 0.350)  Gilbert: w 1.63 (d 0.303)  LasVegas: w 1.11 (d 0.342)  Toronto: w 0.45 (d 0.431)
+Epoch 160 [  adapt] loss 2.1261  cls 0.2682  pr 1.3255  mg 0.3439  al(w=0.82) 1.3791  ent 0.3771  sep 0.0019  vx 0.0084  pl 0.0000 | src_train_f1 0.8032  src_val_f1 0.6861 | snd 6.1573  tgt ACC 0.8491  AUROC 0.9678  MacroF 0.6806
+Epoch 165 [  adapt] loss 2.4532  cls 0.3323  pr 1.3309  mg 0.3518  al(w=0.95) 1.4004  ent 0.4343  sep 0.0019  vx 0.0428  pl 0.0000 | src_train_f1 0.7239  src_val_f1 0.6760 | snd 6.1595  tgt ACC 0.8500  AUROC 0.9670  MacroF 0.6809
+Epoch 170 [  adapt] loss 2.3930  cls 0.1982  pr 1.3026  mg 0.3270  al(w=1.00) 1.3886  ent 0.5119  sep 0.0018  vx 0.0087  pl 0.0000 | src_train_f1 0.7146  src_val_f1 0.7084 | snd 6.1410  tgt ACC 0.8381  AUROC 0.9657  MacroF 0.6780
+Epoch 175 [  adapt] loss 2.4095  cls 0.2334  pr 1.2923  mg 0.3209  al(w=1.00) 1.3880  ent 0.4753  sep 0.0018  vx 0.0105  pl 0.0000 | src_train_f1 0.7181  src_val_f1 0.6824 | snd 6.1672  tgt ACC 0.8499  AUROC 0.9667  MacroF 0.6789
+  [select] Madison: w 0.78 (d 0.377)  Glendale: w 1.03 (d 0.349)  Gilbert: w 1.54 (d 0.308)  LasVegas: w 1.30 (d 0.326)  Toronto: w 0.35 (d 0.456)
+Epoch 180 [  adapt] loss 2.4076  cls 0.2497  pr 1.3020  mg 0.3335  al(w=1.00) 1.3699  ent 0.4567  sep 0.0018  vx 0.0147  pl 0.0000 | src_train_f1 0.6810  src_val_f1 0.6656 | snd 6.1415  tgt ACC 0.8370  AUROC 0.9644  MacroF 0.6673
+Epoch 185 [  adapt] loss 2.4472  cls 0.2821  pr 1.2874  mg 0.3209  al(w=1.00) 1.3753  ent 0.4818  sep 0.0017  vx 0.0149  pl 0.0000 | src_train_f1 0.7300  src_val_f1 0.6828 | snd 6.1913  tgt ACC 0.8524  AUROC 0.9656  MacroF 0.6798
+Epoch 190 [  adapt] loss 2.2803  cls 0.2177  pr 1.2837  mg 0.3205  al(w=1.00) 1.3268  ent 0.3765  sep 0.0016  vx 0.0089  pl 0.0000 | src_train_f1 0.6815  src_val_f1 0.6717 | snd 6.1549  tgt ACC 0.8415  AUROC 0.9642  MacroF 0.6686
+Epoch 195 [  adapt] loss 2.3680  cls 0.2369  pr 1.2879  mg 0.3283  al(w=1.00) 1.3513  ent 0.4542  sep 0.0016  vx 0.0056  pl 0.0000 | src_train_f1 0.6813  src_val_f1 0.6781 | snd 6.1891  tgt ACC 0.8451  AUROC 0.9633  MacroF 0.6699
+  [select] Madison: w 0.83 (d 0.357)  Glendale: w 1.05 (d 0.333)  Gilbert: w 1.47 (d 0.300)  LasVegas: w 1.05 (d 0.333)  Toronto: w 0.61 (d 0.388)
+Epoch 200 [  adapt] loss 2.3611  cls 0.2957  pr 1.2743  mg 0.3161  al(w=1.00) 1.3349  ent 0.3761  sep 0.0015  vx 0.0161  pl 0.0000 | src_train_f1 0.7236  src_val_f1 0.6621 | snd 6.1714  tgt ACC 0.8302  AUROC 0.9592  MacroF 0.6595
+Epoch 205 [  adapt] loss 2.3198  cls 0.2436  pr 1.2580  mg 0.3056  al(w=1.00) 1.3191  ent 0.4499  sep 0.0015  vx 0.0129  pl 0.0000 | src_train_f1 0.7512  src_val_f1 0.6910 | snd 6.1713  tgt ACC 0.8521  AUROC 0.9652  MacroF 0.6775
+Epoch 210 [  adapt] loss 2.2619  cls 0.2454  pr 1.2556  mg 0.3051  al(w=1.00) 1.3106  ent 0.3497  sep 0.0014  vx 0.0098  pl 0.0000 | src_train_f1 0.7160  src_val_f1 0.6742 | snd 6.1704  tgt ACC 0.8363  AUROC 0.9610  MacroF 0.6660
+Epoch 215 [  adapt] loss 2.2737  cls 0.2095  pr 1.2357  mg 0.2866  al(w=1.00) 1.3301  ent 0.4364  sep 0.0013  vx 0.0080  pl 0.0000 | src_train_f1 0.7061  src_val_f1 0.6975 | snd 6.1736  tgt ACC 0.8521  AUROC 0.9640  MacroF 0.6792
+  [select] Madison: w 0.77 (d 0.356)  Glendale: w 0.91 (d 0.340)  Gilbert: w 1.34 (d 0.301)  LasVegas: w 1.07 (d 0.324)  Toronto: w 0.90 (d 0.341)
+Epoch 220 [  adapt] loss 2.3044  cls 0.2686  pr 1.2323  mg 0.2865  al(w=1.00) 1.3197  ent 0.4030  sep 0.0012  vx 0.0103  pl 0.0000 | src_train_f1 0.7030  src_val_f1 0.6685 | snd 6.1716  tgt ACC 0.8272  AUROC 0.9578  MacroF 0.6542
+Epoch 225 [  adapt] loss 2.2213  cls 0.2082  pr 1.2233  mg 0.2819  al(w=1.00) 1.2933  ent 0.4205  sep 0.0011  vx 0.0084  pl 0.0000 | src_train_f1 0.7345  src_val_f1 0.6864 | snd 6.1661  tgt ACC 0.8505  AUROC 0.9642  MacroF 0.6769
+Epoch 230 [  adapt] loss 2.2035  cls 0.2397  pr 1.2222  mg 0.2787  al(w=1.00) 1.2734  ent 0.3656  sep 0.0010  vx 0.0092  pl 0.0000 | src_train_f1 0.7082  src_val_f1 0.6787 | snd 6.1961  tgt ACC 0.8416  AUROC 0.9602  MacroF 0.6672
+Epoch 235 [  adapt] loss 2.2231  cls 0.2228  pr 1.2175  mg 0.2773  al(w=1.00) 1.2944  ent 0.4010  sep 0.0010  vx 0.0045  pl 0.0000 | src_train_f1 0.8120  src_val_f1 0.6843 | snd 6.1644  tgt ACC 0.8495  AUROC 0.9627  MacroF 0.6759
+  [select] Madison: w 0.83 (d 0.350)  Glendale: w 0.99 (d 0.332)  Gilbert: w 1.34 (d 0.301)  LasVegas: w 1.19 (d 0.314)  Toronto: w 0.66 (d 0.373)
+Epoch 240 [  adapt] loss 2.2996  cls 0.3612  pr 1.2301  mg 0.2919  al(w=1.00) 1.2702  ent 0.3038  sep 0.0009  vx 0.0145  pl 0.0000 | src_train_f1 0.6797  src_val_f1 0.6577 | snd 6.1986  tgt ACC 0.8123  AUROC 0.9489  MacroF 0.6410
+Epoch 245 [  adapt] loss 2.2912  cls 0.2316  pr 1.2267  mg 0.2918  al(w=1.00) 1.3041  ent 0.4804  sep 0.0009  vx 0.0071  pl 0.0000 | src_train_f1 0.7029  src_val_f1 0.6869 | snd 6.1668  tgt ACC 0.8481  AUROC 0.9611  MacroF 0.6760
+Epoch 250 [  adapt] loss 2.2960  cls 0.3332  pr 1.2137  mg 0.2749  al(w=1.00) 1.2773  ent 0.3652  sep 0.0009  vx 0.0501  pl 0.0000 | src_train_f1 0.7229  src_val_f1 0.6803 | snd 6.1834  tgt ACC 0.8379  AUROC 0.9604  MacroF 0.6609
+Epoch 255 [  adapt] loss 2.1692  cls 0.1800  pr 1.2131  mg 0.2751  al(w=1.00) 1.2844  ent 0.4039  sep 0.0008  vx 0.0022  pl 0.0000 | src_train_f1 0.6933  src_val_f1 0.6794 | snd 6.1733  tgt ACC 0.8463  AUROC 0.9618  MacroF 0.6724
+  [select] Madison: w 0.63 (d 0.353)  Glendale: w 0.83 (d 0.326)  Gilbert: w 1.26 (d 0.285)  LasVegas: w 1.43 (d 0.272)  Toronto: w 0.85 (d 0.324)
+Epoch 260 [  adapt] loss 2.2406  cls 0.2657  pr 1.2175  mg 0.2819  al(w=1.00) 1.2684  ent 0.3979  sep 0.0009  vx 0.0164  pl 0.0000 | src_train_f1 0.7094  src_val_f1 0.6841 | snd 6.1758  tgt ACC 0.8419  AUROC 0.9609  MacroF 0.6663
+Epoch 265 [  adapt] loss 2.2039  cls 0.2086  pr 1.2005  mg 0.2665  al(w=1.00) 1.2766  ent 0.4478  sep 0.0009  vx 0.0067  pl 0.0000 | src_train_f1 0.7151  src_val_f1 0.6780 | snd 6.1545  tgt ACC 0.8425  AUROC 0.9599  MacroF 0.6697
+Epoch 270 [  adapt] loss 2.1773  cls 0.1748  pr 1.1950  mg 0.2618  al(w=1.00) 1.2857  ent 0.4522  sep 0.0008  vx 0.0024  pl 0.0000 | src_train_f1 0.7032  src_val_f1 0.6839 | snd 6.1906  tgt ACC 0.8429  AUROC 0.9593  MacroF 0.6659
+[phase] adapt -> refine at epoch 271 (after 120 adapt epochs)
+Epoch 275 [ refine] loss 2.1273  cls 0.2376  pr 1.1881  mg 0.2573  al(w=1.00) 1.2439  ent 0.3117  sep 0.0007  vx 0.0115  pl 0.0373 | src_train_f1 0.7252  src_val_f1 0.6868 | snd 6.1648  tgt ACC 0.8521  AUROC 0.9618  MacroF 0.6770
+  [select] Madison: w 0.72 (d 0.355)  Glendale: w 0.88 (d 0.335)  Gilbert: w 1.27 (d 0.298)  LasVegas: w 1.28 (d 0.297)  Toronto: w 0.85 (d 0.337)
+Epoch 280 [ refine] loss 2.1398  cls 0.2031  pr 1.1724  mg 0.2420  al(w=1.00) 1.2710  ent 0.3751  sep 0.0007  vx 0.0041  pl 0.0428 | src_train_f1 0.6996  src_val_f1 0.6755 | snd 6.1861  tgt ACC 0.8355  AUROC 0.9554  MacroF 0.6618
+Epoch 285 [ refine] loss 2.2658  cls 0.2628  pr 1.1854  mg 0.2581  al(w=1.00) 1.2641  ent 0.4970  sep 0.0007  vx 0.0121  pl 0.0448 | src_train_f1 0.7369  src_val_f1 0.6958 | snd 6.1941  tgt ACC 0.8527  AUROC 0.9593  MacroF 0.6767
+Epoch 290 [ refine] loss 2.0989  cls 0.2379  pr 1.1708  mg 0.2440  al(w=1.00) 1.2352  ent 0.2962  sep 0.0007  vx 0.0091  pl 0.0334 | src_train_f1 0.7187  src_val_f1 0.6558 | snd 6.1828  tgt ACC 0.8142  AUROC 0.9441  MacroF 0.6460
+Epoch 295 [ refine] loss 2.1444  cls 0.2411  pr 1.1693  mg 0.2446  al(w=1.00) 1.2526  ent 0.3442  sep 0.0007  vx 0.0058  pl 0.0430 | src_train_f1 0.7213  src_val_f1 0.6900 | snd 6.1840  tgt ACC 0.8513  AUROC 0.9593  MacroF 0.6746
+  [select] Madison: w 0.76 (d 0.336)  Glendale: w 0.90 (d 0.320)  Gilbert: w 1.37 (d 0.278)  LasVegas: w 1.18 (d 0.293)  Toronto: w 0.78 (d 0.334)
+Epoch 300 [ refine] loss 2.1534  cls 0.2468  pr 1.1773  mg 0.2535  al(w=1.00) 1.2518  ent 0.3389  sep 0.0006  vx 0.0089  pl 0.0430 | src_train_f1 0.7292  src_val_f1 0.6615 | snd 6.1705  tgt ACC 0.8259  AUROC 0.9515  MacroF 0.6561
+
+------------------------------------------------------------
+  Model selection (target labels never used to select)
+------------------------------------------------------------
+  criterion     epoch     score   tgt MacroF  vs oracle
+  src_val_f1      150    0.7543       0.7142    -0.0087 *
+  SND               1    7.6004       0.1133    -0.6096  
+  neg_entropy     285   -0.2427       0.6767    -0.0462  
+  last epoch      300         -       0.6561    -0.0668  
+  oracle          140         -       0.7229    +0.0000   (upper bound, not selectable)
+  -> reporting epoch 150 chosen by 'src_val'
+------------------------------------------------------------
+Restoring checkpoint from epoch 150 (selected by 'src_val').
+
+------------------------------------------------------------
+  Seed 42 results
+------------------------------------------------------------
+  Source    Madison: ACC 0.8997  AUROC 0.9792  MacroF 0.7168
+  Source   Glendale: ACC 0.8635  AUROC 0.9756  MacroF 0.7253
+  Source    Gilbert: ACC 0.8392  AUROC 0.9656  MacroF 0.6864
+  Source   LasVegas: ACC 0.8642  AUROC 0.9722  MacroF 0.7201
+  Source    Toronto: ACC 0.9316  AUROC 0.9882  MacroF 0.7222
+  Target    Phoenix: ACC 0.8560  AUROC 0.9697  MacroF 0.7142
+
+============================================================
+  Final results — Phoenix, 1 run(s)
+============================================================
+  majority class : ACC 0.3953  AUROC 0.5000  MacroF 0.1133   (no-skill reference)
+  ACC           : 0.8560
+  AUROC         : 0.9697
+  MacroF        : 0.7142
+============================================================
+
+------------------------------------------------------------
+  Saved to runs/run_007_yelp_Phoenix
+------------------------------------------------------------
+  log.txt      the full console output of this run
+  config.json  every hyper-parameter + argv
+  history.csv  per-epoch metrics (the table view of the curves)
+  metrics.json final scores, per seed and aggregated
+  figures/     9 PNGs, each named run_007_yelp_Phoenix_<figure>.png
+  runs/index.csv updated — one row per run
+------------------------------------------------------------

@@ -1,0 +1,305 @@
+============================================================
+  FGW prototype-graph Domain Adaptation  (Cora_full)
+============================================================
+  Sources       : ['W0', 'W1', 'W2', 'W3', 'W4']
+  Target        : W5
+  Source labels : 10% (stratified draw; target 0%)
+  Selection     : src_val (20% of source labels held out)
+  Seeds         : [42]
+  Device        : cuda
+  feature_dim   : 8710
+  num_classes   : 70
+  proj/hidden   : 128 / 64  (frozen SVD basis)
+  schedule      : warmup <= 150 (armed at 40, patience 40, proto gate 0.9) -> adapt 120 -> refine, of 800 epochs
+  ego_size k    : 16  (+8 kNN edges below degree 3)
+  class weights : inverse-freq^0.5   val metric: auto
+  proto_size n_p: 8  (M=3 per class)
+  fgw alpha,eps : 0.5, 0.05
+  head/LN       : 64 / True
+  mode          : FGW domain adaptation
+  selection     : FGW s_global/s_local
+  predict       : head
+  split_by      : word
+============================================================
+
+Loading data ...
+  [Cora_full] reading data/cora_full/cora.npz
+  [Cora_full] 19793 papers, 8710 attributes, 70 classes; split_by=word
+  W0: 3299 nodes, 6804 edges, word 7.44-13, 70/70 classes present, top5 27:221 33:193 57:177 13:128 48:120
+  W1: 3299 nodes, 4610 edges, word 6.72-7.44, 70/70 classes present, top5 33:171 57:162 27:152 7:125 53:110
+  W2: 3298 nodes, 4010 edges, word 6.18-6.72, 70/70 classes present, top5 57:171 33:137 27:137 7:132 51:125
+  W3: 3299 nodes, 3186 edges, word 5.65-6.18, 70/70 classes present, top5 57:160 33:144 53:117 39:112 34:111
+  W4: 3299 nodes, 3124 edges, word 4.96-5.65, 70/70 classes present, top5 57:129 53:111 33:106 7:104 34:94
+  W5 (target): 3299 nodes, 4066 edges, word 1.18-4.96, 70/70 classes present, top5 19:191 57:129 14:117 6:110 33:104
+
+Model parameters: 142,214
+
+Training ...
+
+Densifying with 8 feature-kNN edges per node below degree 3 (transductive, label-free):
+  kNN-augment W0: 2405 low-degree nodes (< 3) got 8 feature neighbours each; mean degree 2.06 -> 11.06, isolated 31.9% -> 0.0%
+  kNN-augment W1: 2763 low-degree nodes (< 3) got 8 feature neighbours each; mean degree 1.40 -> 11.41, isolated 37.9% -> 0.0%
+  kNN-augment W2: 2828 low-degree nodes (< 3) got 8 feature neighbours each; mean degree 1.22 -> 11.37, isolated 43.0% -> 0.0%
+  kNN-augment W3: 2966 low-degree nodes (< 3) got 8 feature neighbours each; mean degree 0.97 -> 11.35, isolated 48.1% -> 0.0%
+  kNN-augment W4: 2957 low-degree nodes (< 3) got 8 feature neighbours each; mean degree 0.95 -> 11.27, isolated 49.6% -> 0.0%
+  kNN-augment W5 (target): 2840 low-degree nodes (< 3) got 8 feature neighbours each; mean degree 1.23 -> 11.41, isolated 42.4% -> 0.0%
+Frozen SVD input projection: 8710 -> 128 (fitted on 19793 unlabeled nodes, 1,114,880 trainable params removed)
+Supervision budget: 10% source labels (stratified draw, 20% held out for selection) -> train+val nodes [W0 256+76v/3299, W1 258+74v/3299, W2 255+77v/3298, W3 258+75v/3299, W4 253+78v/3299]
+  classes covered by the training labels: [70, 70, 70, 70, 70] of 70
+Precomputing PPR ego-graphs (sources: 1280 labeled seeds, target: 3299 nodes) ...
+/home/ubuntu/Domain-Adaptation/src/fgw_ego.py:87: UserWarning: Sparse invariant checks are implicitly disabled. Memory errors (e.g. SEGFAULT) will occur when operating on a sparse tensor which violates the invariants, but checks incur performance overhead. To silence this warning, explicitly opt in or out. See `torch.sparse.check_sparse_tensor_invariants.__doc__` for guidance.  (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/Context.cpp:816.)
+  return torch.sparse_coo_tensor(
+  ego support W0: mean 16.0/16 nodes, 100% full, 0% isolated
+  ego support W1: mean 16.0/16 nodes, 100% full, 0% isolated
+  ego support W2: mean 16.0/16 nodes, 100% full, 0% isolated
+  ego support W3: mean 16.0/16 nodes, 100% full, 0% isolated
+  ego support W4: mean 16.0/16 nodes, 100% full, 0% isolated
+  ego support W5: mean 16.0/16 nodes, 100% full, 0% isolated
+Prototype density calibrated to 0.540 (mean C_ego = 0.460)
+Class prior: source [0.013, 0.004, 0.013, 0.022, 0.004, 0.016, 0.019, 0.035, 0.012, 0.020, 0.007, 0.012, 0.004, 0.030, 0.013, 0.005, 0.004, 0.004, 0.004, 0.014, 0.021, 0.009, 0.020, 0.009, 0.019, 0.018, 0.015, 0.044, 0.005, 0.021, 0.010, 0.019, 0.005, 0.047, 0.030, 0.004, 0.015, 0.007, 0.004, 0.032, 0.013, 0.010, 0.004, 0.004, 0.005, 0.020, 0.005, 0.004, 0.030, 0.014, 0.004, 0.033, 0.027, 0.038, 0.005, 0.025, 0.015, 0.050, 0.012, 0.017, 0.005, 0.007, 0.006, 0.016, 0.005, 0.004, 0.005, 0.004, 0.004, 0.004] | target [0.013, 0.004, 0.013, 0.022, 0.004, 0.016, 0.019, 0.035, 0.012, 0.020, 0.007, 0.012, 0.004, 0.030, 0.013, 0.005, 0.004, 0.004, 0.004, 0.014, 0.021, 0.009, 0.020, 0.009, 0.019, 0.018, 0.015, 0.044, 0.005, 0.021, 0.010, 0.019, 0.005, 0.047, 0.030, 0.004, 0.015, 0.007, 0.004, 0.032, 0.013, 0.010, 0.004, 0.004, 0.005, 0.020, 0.005, 0.004, 0.030, 0.014, 0.004, 0.033, 0.027, 0.038, 0.005, 0.025, 0.015, 0.050, 0.012, 0.017, 0.005, 0.007, 0.006, 0.016, 0.005, 0.004, 0.005, 0.004, 0.004, 0.004] [source prior (--estimate_prior to run BBSE)]; IM balance x1.42
+Class-weighted CE on (inverse-frequency^0.5): weights 0.43-1.52 over 70 labeled classes
+Held-out source split scored by accuracy (380 held-out nodes / 70 classes = 5.4 per class); this drives both the warm-up plateau test and checkpoint selection.
+Schedule: warmup until held-out source F1 plateau (EMA, patience 40, armed after 40), gated on L_proto <= 3.824, capped at 150 epochs; then 120 adapt epochs (ramp 20), then refine.
+Source selection: FGW transferability (s_global, s_local) refreshed every 20 epochs against 32 target ego-graphs.
+[fgw-scale] C_ego mean=0.454 std=0.172 (over reached pairs) | C_p mean=0.438 std=0.297 (target density 0.540)
+Epoch   1 [ warmup] loss 5.8904  cls 4.2903  pr 4.2491  mg 0.5496  al(w=0.00) 0.0000  ent 0.0000  sep 0.0499  vx 0.0004  pl 0.0000 | src_train_f1 0.0102  src_val_acc 0.0184 | snd 7.5957  tgt ACC 0.0115  AUROC 0.5410  MacroF 0.0027
+Epoch   5 [ warmup] loss 5.8198  cls 4.2204  pr 4.2511  mg 0.5479  al(w=0.00) 0.0000  ent 0.0000  sep 0.0496  vx 0.0001  pl 0.0000 | src_train_f1 0.0127  src_val_acc 0.0289 | snd 7.5964  tgt ACC 0.0303  AUROC 0.5863  MacroF 0.0083
+Epoch  10 [ warmup] loss 5.7502  cls 4.1574  pr 4.2428  mg 0.5405  al(w=0.00) 0.0000  ent 0.0000  sep 0.0492  vx 0.0007  pl 0.0000 | src_train_f1 0.0344  src_val_acc 0.0500 | snd 7.5951  tgt ACC 0.0558  AUROC 0.6204  MacroF 0.0228
+Epoch  15 [ warmup] loss 5.6756  cls 4.0852  pr 4.2421  mg 0.5370  al(w=0.00) 0.0000  ent 0.0000  sep 0.0488  vx 0.0006  pl 0.0000 | src_train_f1 0.0236  src_val_acc 0.1000 | snd 7.5899  tgt ACC 0.0773  AUROC 0.6498  MacroF 0.0340
+Epoch  20 [ warmup] loss 5.5865  cls 3.9995  pr 4.2375  mg 0.5336  al(w=0.00) 0.0000  ent 0.0000  sep 0.0484  vx 0.0008  pl 0.0000 | src_train_f1 0.0541  src_val_acc 0.1474 | snd 7.5759  tgt ACC 0.1009  AUROC 0.6765  MacroF 0.0460
+Epoch  25 [ warmup] loss 5.4777  cls 3.8912  pr 4.2366  mg 0.5338  al(w=0.00) 0.0000  ent 0.0000  sep 0.0480  vx 0.0001  pl 0.0000 | src_train_f1 0.0796  src_val_acc 0.2184 | snd 7.5382  tgt ACC 0.1385  AUROC 0.7006  MacroF 0.0745
+Epoch  30 [ warmup] loss 5.3482  cls 3.7647  pr 4.2303  mg 0.5324  al(w=0.00) 0.0000  ent 0.0000  sep 0.0477  vx 0.0010  pl 0.0000 | src_train_f1 0.1020  src_val_acc 0.2421 | snd 7.4513  tgt ACC 0.1616  AUROC 0.7214  MacroF 0.0879
+Epoch  35 [ warmup] loss 5.2541  cls 3.6716  pr 4.2284  mg 0.5322  al(w=0.00) 0.0000  ent 0.0000  sep 0.0473  vx 0.0019  pl 0.0000 | src_train_f1 0.1251  src_val_acc 0.2711 | snd 7.2873  tgt ACC 0.1767  AUROC 0.7372  MacroF 0.0981
+Epoch  40 [ warmup] loss 5.0929  cls 3.5141  pr 4.2203  mg 0.5303  al(w=0.00) 0.0000  ent 0.0000  sep 0.0470  vx 0.0027  pl 0.0000 | src_train_f1 0.1165  src_val_acc 0.2789 | snd 7.0448  tgt ACC 0.1916  AUROC 0.7465  MacroF 0.1061
+Epoch  45 [ warmup] loss 4.9947  cls 3.4166  pr 4.2193  mg 0.5301  al(w=0.00) 0.0000  ent 0.0000  sep 0.0467  vx 0.0108  pl 0.0000 | src_train_f1 0.1355  src_val_acc 0.2789 | snd 6.7405  tgt ACC 0.2001  AUROC 0.7550  MacroF 0.1110
+Epoch  50 [ warmup] loss 4.7844  cls 3.2103  pr 4.2119  mg 0.5273  al(w=0.00) 0.0000  ent 0.0000  sep 0.0464  vx 0.0024  pl 0.0000 | src_train_f1 0.1808  src_val_acc 0.2895 | snd 6.4190  tgt ACC 0.2167  AUROC 0.7633  MacroF 0.1188
+Epoch  55 [ warmup] loss 4.7060  cls 3.1326  pr 4.2107  mg 0.5270  al(w=0.00) 0.0000  ent 0.0000  sep 0.0462  vx 0.0036  pl 0.0000 | src_train_f1 0.1851  src_val_acc 0.3000 | snd 6.0828  tgt ACC 0.2240  AUROC 0.7708  MacroF 0.1230
+Epoch  60 [ warmup] loss 4.5212  cls 2.9511  pr 4.2061  mg 0.5238  al(w=0.00) 0.0000  ent 0.0000  sep 0.0459  vx 0.0059  pl 0.0000 | src_train_f1 0.2150  src_val_acc 0.3184 | snd 5.7468  tgt ACC 0.2334  AUROC 0.7765  MacroF 0.1362
+Epoch  65 [ warmup] loss 4.5322  cls 2.9630  pr 4.2039  mg 0.5236  al(w=0.00) 0.0000  ent 0.0000  sep 0.0457  vx 0.0027  pl 0.0000 | src_train_f1 0.1919  src_val_acc 0.3395 | snd 5.4957  tgt ACC 0.2416  AUROC 0.7815  MacroF 0.1442
+Epoch  70 [ warmup] loss 4.3319  cls 2.7659  pr 4.1977  mg 0.5214  al(w=0.00) 0.0000  ent 0.0000  sep 0.0454  vx 0.0067  pl 0.0000 | src_train_f1 0.2485  src_val_acc 0.3395 | snd 5.2753  tgt ACC 0.2470  AUROC 0.7852  MacroF 0.1501
+Epoch  75 [ warmup] loss 4.3088  cls 2.7443  pr 4.1955  mg 0.5202  al(w=0.00) 0.0000  ent 0.0000  sep 0.0452  vx 0.0015  pl 0.0000 | src_train_f1 0.2120  src_val_acc 0.3526 | snd 5.1037  tgt ACC 0.2528  AUROC 0.7897  MacroF 0.1660
+Epoch  80 [ warmup] loss 4.2985  cls 2.7358  pr 4.1923  mg 0.5190  al(w=0.00) 0.0000  ent 0.0000  sep 0.0450  vx 0.0073  pl 0.0000 | src_train_f1 0.2473  src_val_acc 0.3684 | snd 4.8918  tgt ACC 0.2540  AUROC 0.7928  MacroF 0.1686
+Epoch  85 [ warmup] loss 4.1147  cls 2.5535  pr 4.1891  mg 0.5184  al(w=0.00) 0.0000  ent 0.0000  sep 0.0448  vx 0.0065  pl 0.0000 | src_train_f1 0.2534  src_val_acc 0.3711 | snd 4.7528  tgt ACC 0.2631  AUROC 0.7961  MacroF 0.1746
+Epoch  90 [ warmup] loss 4.0230  cls 2.4648  pr 4.1841  mg 0.5158  al(w=0.00) 0.0000  ent 0.0000  sep 0.0445  vx 0.0084  pl 0.0000 | src_train_f1 0.2843  src_val_acc 0.3842 | snd 4.6436  tgt ACC 0.2604  AUROC 0.7972  MacroF 0.1764
+Epoch  95 [ warmup] loss 4.0011  cls 2.4444  pr 4.1804  mg 0.5154  al(w=0.00) 0.0000  ent 0.0000  sep 0.0443  vx 0.0013  pl 0.0000 | src_train_f1 0.3149  src_val_acc 0.3816 | snd 4.5130  tgt ACC 0.2640  AUROC 0.8014  MacroF 0.1805
+Epoch 100 [ warmup] loss 3.9139  cls 2.3595  pr 4.1756  mg 0.5142  al(w=0.00) 0.0000  ent 0.0000  sep 0.0442  vx 0.0034  pl 0.0000 | src_train_f1 0.2890  src_val_acc 0.3947 | snd 4.4021  tgt ACC 0.2652  AUROC 0.8008  MacroF 0.1818
+Epoch 105 [ warmup] loss 3.7338  cls 2.1808  pr 4.1731  mg 0.5132  al(w=0.00) 0.0000  ent 0.0000  sep 0.0440  vx 0.0039  pl 0.0000 | src_train_f1 0.3403  src_val_acc 0.3868 | snd 4.3176  tgt ACC 0.2637  AUROC 0.8013  MacroF 0.1853
+Epoch 110 [ warmup] loss 3.6853  cls 2.1340  pr 4.1693  mg 0.5126  al(w=0.00) 0.0000  ent 0.0000  sep 0.0438  vx 0.0121  pl 0.0000 | src_train_f1 0.3740  src_val_acc 0.3974 | snd 4.2062  tgt ACC 0.2613  AUROC 0.8008  MacroF 0.1845
+Epoch 115 [ warmup] loss 3.7055  cls 2.1569  pr 4.1643  mg 0.5104  al(w=0.00) 0.0000  ent 0.0000  sep 0.0436  vx 0.0082  pl 0.0000 | src_train_f1 0.3391  src_val_acc 0.3895 | snd 4.1891  tgt ACC 0.2646  AUROC 0.8023  MacroF 0.1941
+Epoch 120 [ warmup] loss 3.6589  cls 2.1104  pr 4.1631  mg 0.5112  al(w=0.00) 0.0000  ent 0.0000  sep 0.0434  vx 0.0055  pl 0.0000 | src_train_f1 0.3579  src_val_acc 0.3842 | snd 4.1068  tgt ACC 0.2640  AUROC 0.8047  MacroF 0.1981
+Epoch 125 [ warmup] loss 3.4969  cls 1.9514  pr 4.1577  mg 0.5090  al(w=0.00) 0.0000  ent 0.0000  sep 0.0433  vx 0.0232  pl 0.0000 | src_train_f1 0.4208  src_val_acc 0.4000 | snd 4.0437  tgt ACC 0.2643  AUROC 0.8055  MacroF 0.1977
+Epoch 130 [ warmup] loss 3.5166  cls 1.9719  pr 4.1552  mg 0.5091  al(w=0.00) 0.0000  ent 0.0000  sep 0.0431  vx 0.0105  pl 0.0000 | src_train_f1 0.3966  src_val_acc 0.4000 | snd 4.0549  tgt ACC 0.2634  AUROC 0.8043  MacroF 0.1948
+Epoch 135 [ warmup] loss 3.5258  cls 1.9836  pr 4.1498  mg 0.5076  al(w=0.00) 0.0000  ent 0.0000  sep 0.0430  vx 0.0007  pl 0.0000 | src_train_f1 0.3859  src_val_acc 0.3868 | snd 3.9528  tgt ACC 0.2628  AUROC 0.8027  MacroF 0.2015
+Epoch 140 [ warmup] loss 3.3975  cls 1.8572  pr 4.1458  mg 0.5066  al(w=0.00) 0.0000  ent 0.0000  sep 0.0428  vx 0.0088  pl 0.0000 | src_train_f1 0.4154  src_val_acc 0.4000 | snd 3.9523  tgt ACC 0.2671  AUROC 0.8033  MacroF 0.2005
+Epoch 145 [ warmup] loss 3.4175  cls 1.8783  pr 4.1435  mg 0.5061  al(w=0.00) 0.0000  ent 0.0000  sep 0.0427  vx 0.0052  pl 0.0000 | src_train_f1 0.4147  src_val_acc 0.4211 | snd 3.8989  tgt ACC 0.2652  AUROC 0.8048  MacroF 0.1992
+Epoch 150 [ warmup] loss 3.3535  cls 1.8175  pr 4.1363  mg 0.5041  al(w=0.00) 0.0000  ent 0.0000  sep 0.0425  vx 0.0127  pl 0.0000 | src_train_f1 0.4321  src_val_acc 0.4184 | snd 3.8572  tgt ACC 0.2643  AUROC 0.8058  MacroF 0.2023
+[phase] warmup -> adapt at epoch 151: warmup_epochs cap (150); rewound to the warm-up best (epoch 145, src_val 0.4211)
+  ! L_proto is 4.1363, above the 3.8236 gate: the FGW distances are still near chance, so alignment has no class-meaningful prototypes to pull towards. Raise --lambda_fgw_margin / --warmup_epochs, or lower --proto_size.
+  [select] W0: w 0.74 (d 0.555)  W1: w 0.72 (d 0.557)  W2: w 1.42 (d 0.489)  W3: w 0.90 (d 0.535)  W4: w 1.22 (d 0.504)
+Epoch 155 [  adapt] loss 5.9905  cls 1.7761  pr 4.1364  mg 0.5053  al(w=0.47) 4.1820  ent 3.0702  sep 0.0425  vx 0.0194  pl 0.0000 | src_train_f1 0.4041  src_val_acc 0.4079 | snd 3.8819  tgt ACC 0.2680  AUROC 0.8010  MacroF 0.1982
+  [select] W0: w 0.72 (d 0.549)  W1: w 0.74 (d 0.546)  W2: w 1.42 (d 0.482)  W3: w 0.91 (d 0.526)  W4: w 1.21 (d 0.498)
+Epoch 160 [  adapt] loss 7.6819  cls 1.6537  pr 4.1293  mg 0.5030  al(w=0.82) 4.1609  ent 2.6377  sep 0.0425  vx 0.0235  pl 0.0000 | src_train_f1 0.4109  src_val_acc 0.4026 | snd 3.8565  tgt ACC 0.2616  AUROC 0.7929  MacroF 0.1902
+Epoch 165 [  adapt] loss 8.2500  cls 1.6104  pr 4.1261  mg 0.5032  al(w=0.95) 4.1539  ent 2.3975  sep 0.0425  vx 0.0245  pl 0.0000 | src_train_f1 0.4038  src_val_acc 0.3921 | snd 3.8952  tgt ACC 0.2580  AUROC 0.7816  MacroF 0.1816
+Epoch 170 [  adapt] loss 8.4758  cls 1.6231  pr 4.1172  mg 0.5017  al(w=1.00) 4.1479  ent 2.3925  sep 0.0425  vx 0.0200  pl 0.0000 | src_train_f1 0.3860  src_val_acc 0.3842 | snd 3.8915  tgt ACC 0.2655  AUROC 0.7704  MacroF 0.1901
+Epoch 175 [  adapt] loss 8.2901  cls 1.6093  pr 4.1137  mg 0.5006  al(w=1.00) 4.1307  ent 2.0453  sep 0.0426  vx 0.0034  pl 0.0000 | src_train_f1 0.3753  src_val_acc 0.3737 | snd 3.9064  tgt ACC 0.2655  AUROC 0.7616  MacroF 0.1907
+  [select] W0: w 0.88 (d 0.536)  W1: w 0.93 (d 0.531)  W2: w 1.26 (d 0.500)  W3: w 0.92 (d 0.531)  W4: w 1.01 (d 0.522)
+Epoch 180 [  adapt] loss 8.1669  cls 1.4971  pr 4.1045  mg 0.5000  al(w=1.00) 4.1333  ent 2.0240  sep 0.0427  vx 0.0442  pl 0.0000 | src_train_f1 0.4011  src_val_acc 0.3789 | snd 3.8747  tgt ACC 0.2643  AUROC 0.7570  MacroF 0.1821
+Epoch 185 [  adapt] loss 8.1952  cls 1.5036  pr 4.0997  mg 0.4997  al(w=1.00) 4.1244  ent 2.0882  sep 0.0428  vx 0.0401  pl 0.0000 | src_train_f1 0.4211  src_val_acc 0.3895 | snd 3.8725  tgt ACC 0.2631  AUROC 0.7530  MacroF 0.1821
+Epoch 190 [  adapt] loss 7.9609  cls 1.3888  pr 4.0877  mg 0.4962  al(w=1.00) 4.1014  ent 1.9058  sep 0.0430  vx 0.0202  pl 0.0000 | src_train_f1 0.4055  src_val_acc 0.3895 | snd 3.8443  tgt ACC 0.2601  AUROC 0.7488  MacroF 0.1841
+Epoch 195 [  adapt] loss 8.1849  cls 1.5848  pr 4.0858  mg 0.4975  al(w=1.00) 4.1052  ent 1.9536  sep 0.0432  vx 0.0426  pl 0.0000 | src_train_f1 0.3989  src_val_acc 0.4053 | snd 3.7943  tgt ACC 0.2561  AUROC 0.7459  MacroF 0.1816
+  [select] W0: w 0.89 (d 0.551)  W1: w 0.98 (d 0.541)  W2: w 1.15 (d 0.526)  W3: w 1.01 (d 0.538)  W4: w 0.97 (d 0.542)
+Epoch 200 [  adapt] loss 7.9159  cls 1.4093  pr 4.0713  mg 0.4941  al(w=1.00) 4.0920  ent 1.8046  sep 0.0434  vx 0.0037  pl 0.0000 | src_train_f1 0.4361  src_val_acc 0.3921 | snd 3.8057  tgt ACC 0.2537  AUROC 0.7441  MacroF 0.1798
+Epoch 205 [  adapt] loss 7.8590  cls 1.4214  pr 4.0734  mg 0.4962  al(w=1.00) 4.0795  ent 1.6876  sep 0.0436  vx 0.0179  pl 0.0000 | src_train_f1 0.4099  src_val_acc 0.3842 | snd 3.8396  tgt ACC 0.2513  AUROC 0.7438  MacroF 0.1749
+Epoch 210 [  adapt] loss 7.6768  cls 1.2711  pr 4.0620  mg 0.4937  al(w=1.00) 4.0688  ent 1.6540  sep 0.0438  vx 0.0020  pl 0.0000 | src_train_f1 0.4544  src_val_acc 0.3842 | snd 3.8339  tgt ACC 0.2513  AUROC 0.7426  MacroF 0.1775
+Epoch 215 [  adapt] loss 7.7448  cls 1.3219  pr 4.0579  mg 0.4923  al(w=1.00) 4.0746  ent 1.6806  sep 0.0441  vx 0.0079  pl 0.0000 | src_train_f1 0.4121  src_val_acc 0.3711 | snd 3.7730  tgt ACC 0.2567  AUROC 0.7427  MacroF 0.1846
+  [select] W0: w 0.83 (d 0.573)  W1: w 0.96 (d 0.559)  W2: w 1.18 (d 0.538)  W3: w 1.10 (d 0.545)  W4: w 0.92 (d 0.563)
+Epoch 220 [  adapt] loss 7.6800  cls 1.3044  pr 4.0537  mg 0.4917  al(w=1.00) 4.0559  ent 1.6259  sep 0.0443  vx 0.0053  pl 0.0000 | src_train_f1 0.4462  src_val_acc 0.3763 | snd 3.7764  tgt ACC 0.2595  AUROC 0.7434  MacroF 0.1877
+Epoch 225 [  adapt] loss 7.8101  cls 1.4203  pr 4.0487  mg 0.4922  al(w=1.00) 4.0671  ent 1.6340  sep 0.0446  vx 0.0234  pl 0.0000 | src_train_f1 0.4318  src_val_acc 0.3684 | snd 3.8075  tgt ACC 0.2595  AUROC 0.7422  MacroF 0.1847
+Epoch 230 [  adapt] loss 7.7539  cls 1.3047  pr 4.0405  mg 0.4925  al(w=1.00) 4.0740  ent 1.7431  sep 0.0448  vx 0.0266  pl 0.0000 | src_train_f1 0.4214  src_val_acc 0.3868 | snd 3.7707  tgt ACC 0.2561  AUROC 0.7416  MacroF 0.1835
+Epoch 235 [  adapt] loss 7.4726  cls 1.1491  pr 4.0319  mg 0.4900  al(w=1.00) 4.0404  ent 1.5658  sep 0.0451  vx 0.0114  pl 0.0000 | src_train_f1 0.4379  src_val_acc 0.3868 | snd 3.7870  tgt ACC 0.2561  AUROC 0.7414  MacroF 0.1838
+  [select] W0: w 0.74 (d 0.605)  W1: w 0.91 (d 0.585)  W2: w 1.16 (d 0.561)  W3: w 1.18 (d 0.559)  W4: w 1.00 (d 0.576)
+Epoch 240 [  adapt] loss 7.4797  cls 1.2137  pr 4.0241  mg 0.4877  al(w=1.00) 4.0318  ent 1.4744  sep 0.0454  vx 0.0104  pl 0.0000 | src_train_f1 0.4634  src_val_acc 0.3895 | snd 3.8231  tgt ACC 0.2540  AUROC 0.7409  MacroF 0.1819
+Epoch 245 [  adapt] loss 7.3507  cls 1.0825  pr 4.0216  mg 0.4866  al(w=1.00) 4.0306  ent 1.4833  sep 0.0457  vx 0.0088  pl 0.0000 | src_train_f1 0.4980  src_val_acc 0.3684 | snd 3.8077  tgt ACC 0.2507  AUROC 0.7405  MacroF 0.1768
+Epoch 250 [  adapt] loss 7.4726  cls 1.1792  pr 4.0144  mg 0.4863  al(w=1.00) 4.0415  ent 1.5160  sep 0.0459  vx 0.0214  pl 0.0000 | src_train_f1 0.4571  src_val_acc 0.3684 | snd 3.8106  tgt ACC 0.2546  AUROC 0.7390  MacroF 0.1811
+Epoch 255 [  adapt] loss 7.4791  cls 1.1767  pr 4.0181  mg 0.4883  al(w=1.00) 4.0234  ent 1.5654  sep 0.0462  vx 0.0015  pl 0.0000 | src_train_f1 0.4758  src_val_acc 0.3816 | snd 3.8059  tgt ACC 0.2531  AUROC 0.7382  MacroF 0.1827
+  [select] W0: w 0.71 (d 0.638)  W1: w 0.88 (d 0.616)  W2: w 1.22 (d 0.584)  W3: w 1.18 (d 0.587)  W4: w 1.01 (d 0.603)
+Epoch 260 [  adapt] loss 7.4239  cls 1.1414  pr 4.0123  mg 0.4881  al(w=1.00) 4.0189  ent 1.5377  sep 0.0465  vx 0.0211  pl 0.0000 | src_train_f1 0.4949  src_val_acc 0.3789 | snd 3.7899  tgt ACC 0.2522  AUROC 0.7374  MacroF 0.1810
+Epoch 265 [  adapt] loss 7.2716  cls 1.0566  pr 4.0039  mg 0.4871  al(w=1.00) 4.0066  ent 1.4330  sep 0.0468  vx 0.0133  pl 0.0000 | src_train_f1 0.5261  src_val_acc 0.3868 | snd 3.7971  tgt ACC 0.2495  AUROC 0.7370  MacroF 0.1801
+Epoch 270 [  adapt] loss 7.2160  cls 1.0247  pr 3.9971  mg 0.4827  al(w=1.00) 3.9952  ent 1.4162  sep 0.0470  vx 0.0098  pl 0.0000 | src_train_f1 0.4684  src_val_acc 0.3711 | snd 3.7753  tgt ACC 0.2513  AUROC 0.7377  MacroF 0.1827
+[phase] adapt -> refine at epoch 271 (after 120 adapt epochs)
+Epoch 275 [ refine] loss 7.2461  cls 1.1101  pr 3.9931  mg 0.4876  al(w=1.00) 3.9936  ent 1.2886  sep 0.0473  vx 0.0115  pl 0.0855 | src_train_f1 0.4780  src_val_acc 0.3684 | snd 3.7984  tgt ACC 0.2501  AUROC 0.7349  MacroF 0.1753
+  [select] W0: w 0.70 (d 0.647)  W1: w 0.91 (d 0.622)  W2: w 1.26 (d 0.589)  W3: w 1.07 (d 0.605)  W4: w 1.07 (d 0.605)
+Epoch 280 [ refine] loss 7.3502  cls 1.1815  pr 3.9977  mg 0.4876  al(w=1.00) 3.9941  ent 1.3492  sep 0.0476  vx 0.0222  pl 0.0882 | src_train_f1 0.4778  src_val_acc 0.3816 | snd 3.7862  tgt ACC 0.2489  AUROC 0.7343  MacroF 0.1767
+Epoch 285 [ refine] loss 7.3496  cls 1.0902  pr 3.9907  mg 0.4880  al(w=1.00) 4.0017  ent 1.5172  sep 0.0478  vx 0.0143  pl 0.0953 | src_train_f1 0.4731  src_val_acc 0.3658 | snd 3.8225  tgt ACC 0.2516  AUROC 0.7328  MacroF 0.1815
+Epoch 290 [ refine] loss 7.2579  cls 1.0569  pr 3.9883  mg 0.4872  al(w=1.00) 3.9919  ent 1.4224  sep 0.0481  vx 0.0016  pl 0.0916 | src_train_f1 0.5009  src_val_acc 0.3711 | snd 3.8380  tgt ACC 0.2464  AUROC 0.7319  MacroF 0.1769
+Epoch 295 [ refine] loss 7.2659  cls 1.1063  pr 3.9849  mg 0.4864  al(w=1.00) 3.9769  ent 1.3760  sep 0.0483  vx 0.0017  pl 0.0719 | src_train_f1 0.4560  src_val_acc 0.3711 | snd 3.8080  tgt ACC 0.2489  AUROC 0.7333  MacroF 0.1814
+  [select] W0: w 0.67 (d 0.656)  W1: w 0.86 (d 0.631)  W2: w 1.23 (d 0.595)  W3: w 1.15 (d 0.602)  W4: w 1.10 (d 0.606)
+Epoch 300 [ refine] loss 7.1323  cls 0.9931  pr 3.9653  mg 0.4813  al(w=1.00) 3.9910  ent 1.3227  sep 0.0485  vx 0.0045  pl 0.0753 | src_train_f1 0.5182  src_val_acc 0.3816 | snd 3.7948  tgt ACC 0.2477  AUROC 0.7338  MacroF 0.1807
+Epoch 305 [ refine] loss 7.3393  cls 1.1298  pr 3.9664  mg 0.4835  al(w=1.00) 3.9807  ent 1.4790  sep 0.0488  vx 0.0124  pl 0.0831 | src_train_f1 0.4412  src_val_acc 0.3789 | snd 3.7918  tgt ACC 0.2467  AUROC 0.7348  MacroF 0.1786
+Epoch 310 [ refine] loss 7.0538  cls 0.8983  pr 3.9597  mg 0.4790  al(w=1.00) 3.9687  ent 1.4026  sep 0.0491  vx 0.0053  pl 0.0842 | src_train_f1 0.5524  src_val_acc 0.3816 | snd 3.7973  tgt ACC 0.2470  AUROC 0.7323  MacroF 0.1764
+Epoch 315 [ refine] loss 7.1668  cls 1.0369  pr 3.9645  mg 0.4862  al(w=1.00) 3.9581  ent 1.3605  sep 0.0493  vx 0.0092  pl 0.0927 | src_train_f1 0.4735  src_val_acc 0.3763 | snd 3.8015  tgt ACC 0.2458  AUROC 0.7299  MacroF 0.1759
+  [select] W0: w 0.67 (d 0.683)  W1: w 0.87 (d 0.657)  W2: w 1.17 (d 0.627)  W3: w 1.23 (d 0.622)  W4: w 1.06 (d 0.638)
+Epoch 320 [ refine] loss 7.0912  cls 0.9879  pr 3.9658  mg 0.4849  al(w=1.00) 3.9502  ent 1.3262  sep 0.0496  vx 0.0162  pl 0.0770 | src_train_f1 0.4978  src_val_acc 0.3605 | snd 3.8258  tgt ACC 0.2425  AUROC 0.7286  MacroF 0.1729
+Epoch 325 [ refine] loss 7.0169  cls 0.9494  pr 3.9547  mg 0.4823  al(w=1.00) 3.9215  ent 1.3214  sep 0.0499  vx 0.0132  pl 0.0733 | src_train_f1 0.5610  src_val_acc 0.3579 | snd 3.8331  tgt ACC 0.2416  AUROC 0.7277  MacroF 0.1714
+Epoch 330 [ refine] loss 7.0891  cls 1.0278  pr 3.9493  mg 0.4805  al(w=1.00) 3.9266  ent 1.3037  sep 0.0502  vx 0.0021  pl 0.0715 | src_train_f1 0.5060  src_val_acc 0.3711 | snd 3.8171  tgt ACC 0.2413  AUROC 0.7286  MacroF 0.1730
+Epoch 335 [ refine] loss 7.0289  cls 0.9244  pr 3.9499  mg 0.4790  al(w=1.00) 3.9501  ent 1.3427  sep 0.0504  vx 0.0243  pl 0.0759 | src_train_f1 0.5233  src_val_acc 0.3658 | snd 3.7960  tgt ACC 0.2404  AUROC 0.7272  MacroF 0.1716
+  [select] W0: w 0.62 (d 0.683)  W1: w 0.85 (d 0.652)  W2: w 1.21 (d 0.617)  W3: w 1.21 (d 0.616)  W4: w 1.11 (d 0.625)
+Epoch 340 [ refine] loss 7.0472  cls 0.9896  pr 3.9340  mg 0.4800  al(w=1.00) 3.9370  ent 1.2858  sep 0.0507  vx 0.0043  pl 0.0624 | src_train_f1 0.4928  src_val_acc 0.3816 | snd 3.8376  tgt ACC 0.2434  AUROC 0.7282  MacroF 0.1702
+Epoch 345 [ refine] loss 6.9752  cls 0.9133  pr 3.9365  mg 0.4794  al(w=1.00) 3.9304  ent 1.3050  sep 0.0510  vx 0.0055  pl 0.0676 | src_train_f1 0.4967  src_val_acc 0.3763 | snd 3.8299  tgt ACC 0.2428  AUROC 0.7248  MacroF 0.1725
+Epoch 350 [ refine] loss 7.0844  cls 0.9443  pr 3.9351  mg 0.4806  al(w=1.00) 3.9486  ent 1.4232  sep 0.0513  vx 0.0174  pl 0.0729 | src_train_f1 0.4831  src_val_acc 0.3605 | snd 3.8094  tgt ACC 0.2376  AUROC 0.7251  MacroF 0.1727
+Epoch 355 [ refine] loss 6.8998  cls 0.8985  pr 3.9291  mg 0.4797  al(w=1.00) 3.8954  ent 1.2541  sep 0.0516  vx 0.0033  pl 0.0803 | src_train_f1 0.4870  src_val_acc 0.3816 | snd 3.8260  tgt ACC 0.2361  AUROC 0.7238  MacroF 0.1667
+  [select] W0: w 0.61 (d 0.684)  W1: w 0.82 (d 0.655)  W2: w 1.26 (d 0.612)  W3: w 1.22 (d 0.615)  W4: w 1.08 (d 0.628)
+Epoch 360 [ refine] loss 7.0058  cls 0.9714  pr 3.9203  mg 0.4836  al(w=1.00) 3.9127  ent 1.2871  sep 0.0519  vx 0.0089  pl 0.0779 | src_train_f1 0.4947  src_val_acc 0.3684 | snd 3.8387  tgt ACC 0.2355  AUROC 0.7230  MacroF 0.1663
+Epoch 365 [ refine] loss 6.8823  cls 0.8937  pr 3.9090  mg 0.4755  al(w=1.00) 3.8959  ent 1.2434  sep 0.0522  vx 0.0087  pl 0.0785 | src_train_f1 0.5543  src_val_acc 0.3684 | snd 3.8345  tgt ACC 0.2373  AUROC 0.7235  MacroF 0.1705
+Epoch 370 [ refine] loss 6.9193  cls 0.9716  pr 3.9047  mg 0.4789  al(w=1.00) 3.8763  ent 1.2007  sep 0.0525  vx 0.0045  pl 0.0714 | src_train_f1 0.5032  src_val_acc 0.3921 | snd 3.8757  tgt ACC 0.2337  AUROC 0.7216  MacroF 0.1656
+Epoch 375 [ refine] loss 6.8002  cls 0.8099  pr 3.8980  mg 0.4747  al(w=1.00) 3.8772  ent 1.2912  sep 0.0528  vx 0.0053  pl 0.0741 | src_train_f1 0.5339  src_val_acc 0.3684 | snd 3.8714  tgt ACC 0.2322  AUROC 0.7224  MacroF 0.1635
+  [select] W0: w 0.63 (d 0.705)  W1: w 0.79 (d 0.683)  W2: w 1.26 (d 0.636)  W3: w 1.25 (d 0.637)  W4: w 1.08 (d 0.651)
+Epoch 380 [ refine] loss 6.8522  cls 0.8427  pr 3.8977  mg 0.4732  al(w=1.00) 3.8964  ent 1.2909  sep 0.0531  vx 0.0034  pl 0.0816 | src_train_f1 0.5468  src_val_acc 0.3816 | snd 3.8426  tgt ACC 0.2328  AUROC 0.7232  MacroF 0.1633
+Epoch 385 [ refine] loss 6.8844  cls 0.9013  pr 3.8958  mg 0.4740  al(w=1.00) 3.8981  ent 1.2359  sep 0.0534  vx 0.0056  pl 0.0737 | src_train_f1 0.5051  src_val_acc 0.3763 | snd 3.8506  tgt ACC 0.2307  AUROC 0.7237  MacroF 0.1704
+Epoch 390 [ refine] loss 6.7125  cls 0.8204  pr 3.8803  mg 0.4741  al(w=1.00) 3.8759  ent 1.1072  sep 0.0537  vx 0.0361  pl 0.0741 | src_train_f1 0.5495  src_val_acc 0.3684 | snd 3.8476  tgt ACC 0.2307  AUROC 0.7269  MacroF 0.1672
+Epoch 395 [ refine] loss 6.7974  cls 0.8336  pr 3.8874  mg 0.4751  al(w=1.00) 3.8786  ent 1.2373  sep 0.0539  vx 0.0118  pl 0.0834 | src_train_f1 0.5074  src_val_acc 0.3684 | snd 3.8223  tgt ACC 0.2279  AUROC 0.7284  MacroF 0.1654
+  [select] W0: w 0.59 (d 0.721)  W1: w 0.81 (d 0.689)  W2: w 1.19 (d 0.651)  W3: w 1.28 (d 0.644)  W4: w 1.13 (d 0.656)
+Epoch 400 [ refine] loss 6.8060  cls 0.8460  pr 3.8723  mg 0.4701  al(w=1.00) 3.8823  ent 1.2376  sep 0.0542  vx 0.0056  pl 0.0750 | src_train_f1 0.5405  src_val_acc 0.3553 | snd 3.8256  tgt ACC 0.2270  AUROC 0.7266  MacroF 0.1593
+Epoch 405 [ refine] loss 6.7690  cls 0.8084  pr 3.8835  mg 0.4768  al(w=1.00) 3.8616  ent 1.2678  sep 0.0544  vx 0.0098  pl 0.0665 | src_train_f1 0.5915  src_val_acc 0.3658 | snd 3.8422  tgt ACC 0.2216  AUROC 0.7238  MacroF 0.1540
+Epoch 410 [ refine] loss 6.6988  cls 0.8131  pr 3.8714  mg 0.4767  al(w=1.00) 3.8327  ent 1.1804  sep 0.0547  vx 0.0069  pl 0.0772 | src_train_f1 0.5223  src_val_acc 0.3684 | snd 3.8518  tgt ACC 0.2304  AUROC 0.7233  MacroF 0.1627
+Epoch 415 [ refine] loss 6.7151  cls 0.8461  pr 3.8766  mg 0.4763  al(w=1.00) 3.8312  ent 1.1483  sep 0.0550  vx 0.0103  pl 0.0692 | src_train_f1 0.5182  src_val_acc 0.3737 | snd 3.8303  tgt ACC 0.2279  AUROC 0.7216  MacroF 0.1591
+  [select] W0: w 0.62 (d 0.705)  W1: w 0.80 (d 0.679)  W2: w 1.24 (d 0.636)  W3: w 1.27 (d 0.633)  W4: w 1.07 (d 0.651)
+Epoch 420 [ refine] loss 6.6532  cls 0.7893  pr 3.8470  mg 0.4667  al(w=1.00) 3.8264  ent 1.1743  sep 0.0553  vx 0.0019  pl 0.0711 | src_train_f1 0.5293  src_val_acc 0.3658 | snd 3.8249  tgt ACC 0.2295  AUROC 0.7226  MacroF 0.1607
+Epoch 425 [ refine] loss 6.6788  cls 0.7939  pr 3.8477  mg 0.4709  al(w=1.00) 3.8531  ent 1.1564  sep 0.0555  vx 0.0089  pl 0.0781 | src_train_f1 0.5566  src_val_acc 0.3737 | snd 3.8497  tgt ACC 0.2255  AUROC 0.7206  MacroF 0.1575
+Epoch 430 [ refine] loss 6.7170  cls 0.7653  pr 3.8307  mg 0.4617  al(w=1.00) 3.8385  ent 1.3416  sep 0.0558  vx 0.0149  pl 0.0603 | src_train_f1 0.5224  src_val_acc 0.3658 | snd 3.8457  tgt ACC 0.2270  AUROC 0.7218  MacroF 0.1562
+Epoch 435 [ refine] loss 6.7072  cls 0.8090  pr 3.8401  mg 0.4698  al(w=1.00) 3.8368  ent 1.2203  sep 0.0560  vx 0.0123  pl 0.0780 | src_train_f1 0.5228  src_val_acc 0.3763 | snd 3.8799  tgt ACC 0.2273  AUROC 0.7193  MacroF 0.1576
+  [select] W0: w 0.62 (d 0.696)  W1: w 0.85 (d 0.665)  W2: w 1.24 (d 0.627)  W3: w 1.26 (d 0.625)  W4: w 1.04 (d 0.645)
+Epoch 440 [ refine] loss 6.6246  cls 0.7515  pr 3.8301  mg 0.4679  al(w=1.00) 3.7943  ent 1.2650  sep 0.0563  vx 0.0152  pl 0.0645 | src_train_f1 0.5269  src_val_acc 0.3711 | snd 3.8504  tgt ACC 0.2289  AUROC 0.7177  MacroF 0.1635
+Epoch 445 [ refine] loss 6.6664  cls 0.7906  pr 3.8361  mg 0.4705  al(w=1.00) 3.8185  ent 1.2144  sep 0.0566  vx 0.0101  pl 0.0703 | src_train_f1 0.5669  src_val_acc 0.3763 | snd 3.8781  tgt ACC 0.2264  AUROC 0.7151  MacroF 0.1630
+Epoch 450 [ refine] loss 6.5606  cls 0.7460  pr 3.8146  mg 0.4618  al(w=1.00) 3.8224  ent 1.1058  sep 0.0568  vx 0.0156  pl 0.0668 | src_train_f1 0.5814  src_val_acc 0.3789 | snd 3.8727  tgt ACC 0.2261  AUROC 0.7174  MacroF 0.1623
+Epoch 455 [ refine] loss 6.6586  cls 0.7717  pr 3.8208  mg 0.4635  al(w=1.00) 3.8024  ent 1.2846  sep 0.0571  vx 0.0014  pl 0.0663 | src_train_f1 0.5703  src_val_acc 0.3737 | snd 3.8780  tgt ACC 0.2295  AUROC 0.7188  MacroF 0.1643
+  [select] W0: w 0.58 (d 0.703)  W1: w 0.77 (d 0.675)  W2: w 1.19 (d 0.631)  W3: w 1.30 (d 0.622)  W4: w 1.17 (d 0.633)
+Epoch 460 [ refine] loss 6.6724  cls 0.7946  pr 3.8245  mg 0.4700  al(w=1.00) 3.8022  ent 1.2573  sep 0.0573  vx 0.0152  pl 0.0669 | src_train_f1 0.5456  src_val_acc 0.3789 | snd 3.8523  tgt ACC 0.2295  AUROC 0.7198  MacroF 0.1682
+Epoch 465 [ refine] loss 6.5851  cls 0.8021  pr 3.8182  mg 0.4639  al(w=1.00) 3.7913  ent 1.0989  sep 0.0576  vx 0.0243  pl 0.0673 | src_train_f1 0.5415  src_val_acc 0.3789 | snd 3.8612  tgt ACC 0.2234  AUROC 0.7210  MacroF 0.1619
+Epoch 470 [ refine] loss 6.6758  cls 0.8482  pr 3.8229  mg 0.4724  al(w=1.00) 3.8115  ent 1.1372  sep 0.0579  vx 0.0050  pl 0.0601 | src_train_f1 0.5475  src_val_acc 0.3789 | snd 3.8649  tgt ACC 0.2249  AUROC 0.7209  MacroF 0.1612
+Epoch 475 [ refine] loss 6.5389  cls 0.7285  pr 3.8025  mg 0.4652  al(w=1.00) 3.7836  ent 1.1768  sep 0.0581  vx 0.0127  pl 0.0640 | src_train_f1 0.5532  src_val_acc 0.3842 | snd 3.8850  tgt ACC 0.2189  AUROC 0.7195  MacroF 0.1554
+  [select] W0: w 0.55 (d 0.716)  W1: w 0.82 (d 0.675)  W2: w 1.16 (d 0.641)  W3: w 1.35 (d 0.626)  W4: w 1.12 (d 0.644)
+Epoch 480 [ refine] loss 6.5659  cls 0.7079  pr 3.8026  mg 0.4605  al(w=1.00) 3.7863  ent 1.2671  sep 0.0583  vx 0.0157  pl 0.0829 | src_train_f1 0.5779  src_val_acc 0.3711 | snd 3.8794  tgt ACC 0.2201  AUROC 0.7168  MacroF 0.1516
+Epoch 485 [ refine] loss 6.6017  cls 0.7252  pr 3.7981  mg 0.4595  al(w=1.00) 3.7980  ent 1.2864  sep 0.0585  vx 0.0066  pl 0.0703 | src_train_f1 0.6086  src_val_acc 0.3711 | snd 3.8850  tgt ACC 0.2240  AUROC 0.7155  MacroF 0.1569
+Epoch 490 [ refine] loss 6.4764  cls 0.6963  pr 3.7915  mg 0.4625  al(w=1.00) 3.7676  ent 1.1554  sep 0.0588  vx 0.0097  pl 0.0683 | src_train_f1 0.5495  src_val_acc 0.3737 | snd 3.8848  tgt ACC 0.2219  AUROC 0.7186  MacroF 0.1512
+Epoch 495 [ refine] loss 6.5520  cls 0.7531  pr 3.7832  mg 0.4605  al(w=1.00) 3.7746  ent 1.1853  sep 0.0590  vx 0.0193  pl 0.0681 | src_train_f1 0.4997  src_val_acc 0.3684 | snd 3.8762  tgt ACC 0.2201  AUROC 0.7196  MacroF 0.1572
+  [select] W0: w 0.55 (d 0.702)  W1: w 0.82 (d 0.662)  W2: w 1.15 (d 0.628)  W3: w 1.38 (d 0.610)  W4: w 1.10 (d 0.632)
+Epoch 500 [ refine] loss 6.5537  cls 0.7449  pr 3.7899  mg 0.4623  al(w=1.00) 3.7838  ent 1.1824  sep 0.0592  vx 0.0117  pl 0.0593 | src_train_f1 0.5666  src_val_acc 0.3605 | snd 3.9023  tgt ACC 0.2252  AUROC 0.7204  MacroF 0.1582
+Epoch 505 [ refine] loss 6.5271  cls 0.7437  pr 3.7821  mg 0.4593  al(w=1.00) 3.7486  ent 1.2097  sep 0.0594  vx 0.0063  pl 0.0573 | src_train_f1 0.5514  src_val_acc 0.3632 | snd 3.8967  tgt ACC 0.2283  AUROC 0.7187  MacroF 0.1658
+Epoch 510 [ refine] loss 6.5335  cls 0.7586  pr 3.7758  mg 0.4663  al(w=1.00) 3.7531  ent 1.1798  sep 0.0596  vx 0.0122  pl 0.0586 | src_train_f1 0.5350  src_val_acc 0.3605 | snd 3.9022  tgt ACC 0.2240  AUROC 0.7180  MacroF 0.1592
+Epoch 515 [ refine] loss 6.4868  cls 0.6871  pr 3.7698  mg 0.4595  al(w=1.00) 3.7815  ent 1.1817  sep 0.0598  vx 0.0027  pl 0.0631 | src_train_f1 0.5637  src_val_acc 0.3658 | snd 3.8942  tgt ACC 0.2207  AUROC 0.7180  MacroF 0.1583
+  [select] W0: w 0.55 (d 0.701)  W1: w 0.87 (d 0.655)  W2: w 1.21 (d 0.622)  W3: w 1.33 (d 0.612)  W4: w 1.05 (d 0.636)
+Epoch 520 [ refine] loss 6.4117  cls 0.7057  pr 3.7734  mg 0.4623  al(w=1.00) 3.7328  ent 1.0847  sep 0.0600  vx 0.0135  pl 0.0709 | src_train_f1 0.5570  src_val_acc 0.3605 | snd 3.8990  tgt ACC 0.2234  AUROC 0.7196  MacroF 0.1586
+Epoch 525 [ refine] loss 6.4432  cls 0.7103  pr 3.7609  mg 0.4615  al(w=1.00) 3.7518  ent 1.1107  sep 0.0602  vx 0.0144  pl 0.0588 | src_train_f1 0.6017  src_val_acc 0.3632 | snd 3.8820  tgt ACC 0.2231  AUROC 0.7169  MacroF 0.1617
+Epoch 530 [ refine] loss 6.4316  cls 0.6947  pr 3.7502  mg 0.4514  al(w=1.00) 3.7407  ent 1.1575  sep 0.0604  vx 0.0145  pl 0.0572 | src_train_f1 0.5794  src_val_acc 0.3579 | snd 3.8784  tgt ACC 0.2264  AUROC 0.7163  MacroF 0.1626
+Epoch 535 [ refine] loss 6.4283  cls 0.6975  pr 3.7555  mg 0.4626  al(w=1.00) 3.7131  ent 1.1806  sep 0.0606  vx 0.0075  pl 0.0830 | src_train_f1 0.5770  src_val_acc 0.3526 | snd 3.8901  tgt ACC 0.2240  AUROC 0.7151  MacroF 0.1619
+  [select] W0: w 0.52 (d 0.690)  W1: w 0.81 (d 0.646)  W2: w 1.17 (d 0.609)  W3: w 1.40 (d 0.591)  W4: w 1.10 (d 0.615)
+Epoch 540 [ refine] loss 6.4068  cls 0.7235  pr 3.7368  mg 0.4556  al(w=1.00) 3.7036  ent 1.1282  sep 0.0609  vx 0.0111  pl 0.0538 | src_train_f1 0.5503  src_val_acc 0.3579 | snd 3.8514  tgt ACC 0.2246  AUROC 0.7179  MacroF 0.1621
+Epoch 545 [ refine] loss 6.4575  cls 0.7259  pr 3.7519  mg 0.4639  al(w=1.00) 3.7217  ent 1.1708  sep 0.0611  vx 0.0281  pl 0.0516 | src_train_f1 0.5261  src_val_acc 0.3500 | snd 3.8435  tgt ACC 0.2246  AUROC 0.7210  MacroF 0.1600
+Epoch 550 [ refine] loss 6.3201  cls 0.6461  pr 3.7420  mg 0.4642  al(w=1.00) 3.7051  ent 1.0912  sep 0.0613  vx 0.0042  pl 0.0669 | src_train_f1 0.5977  src_val_acc 0.3526 | snd 3.8427  tgt ACC 0.2279  AUROC 0.7245  MacroF 0.1639
+Epoch 555 [ refine] loss 6.4334  cls 0.7370  pr 3.7351  mg 0.4548  al(w=1.00) 3.6952  ent 1.1665  sep 0.0615  vx 0.0257  pl 0.0786 | src_train_f1 0.5488  src_val_acc 0.3579 | snd 3.8832  tgt ACC 0.2219  AUROC 0.7214  MacroF 0.1583
+  [select] W0: w 0.49 (d 0.706)  W1: w 0.80 (d 0.658)  W2: w 1.13 (d 0.623)  W3: w 1.47 (d 0.597)  W4: w 1.10 (d 0.626)
+Epoch 560 [ refine] loss 6.3842  cls 0.6414  pr 3.7390  mg 0.4638  al(w=1.00) 3.7231  ent 1.1957  sep 0.0618  vx 0.0135  pl 0.0584 | src_train_f1 0.5796  src_val_acc 0.3500 | snd 3.8908  tgt ACC 0.2246  AUROC 0.7222  MacroF 0.1551
+Epoch 565 [ refine] loss 6.3263  cls 0.6561  pr 3.7372  mg 0.4593  al(w=1.00) 3.7187  ent 1.0615  sep 0.0620  vx 0.0073  pl 0.0738 | src_train_f1 0.5907  src_val_acc 0.3500 | snd 3.8968  tgt ACC 0.2222  AUROC 0.7196  MacroF 0.1574
+Epoch 570 [ refine] loss 6.3343  cls 0.6452  pr 3.7190  mg 0.4535  al(w=1.00) 3.7004  ent 1.1557  sep 0.0622  vx 0.0173  pl 0.0568 | src_train_f1 0.5702  src_val_acc 0.3500 | snd 3.9049  tgt ACC 0.2222  AUROC 0.7194  MacroF 0.1568
+Epoch 575 [ refine] loss 6.3689  cls 0.6689  pr 3.7024  mg 0.4485  al(w=1.00) 3.7201  ent 1.1517  sep 0.0624  vx 0.0129  pl 0.0602 | src_train_f1 0.5706  src_val_acc 0.3500 | snd 3.8863  tgt ACC 0.2210  AUROC 0.7222  MacroF 0.1536
+  [select] W0: w 0.51 (d 0.703)  W1: w 0.79 (d 0.660)  W2: w 1.12 (d 0.626)  W3: w 1.52 (d 0.595)  W4: w 1.06 (d 0.631)
+Epoch 580 [ refine] loss 6.2800  cls 0.6429  pr 3.7036  mg 0.4542  al(w=1.00) 3.6637  ent 1.1322  sep 0.0626  vx 0.0158  pl 0.0594 | src_train_f1 0.5633  src_val_acc 0.3447 | snd 3.8850  tgt ACC 0.2213  AUROC 0.7215  MacroF 0.1552
+Epoch 585 [ refine] loss 6.3169  cls 0.6993  pr 3.7083  mg 0.4561  al(w=1.00) 3.6826  ent 1.0490  sep 0.0628  vx 0.0109  pl 0.0658 | src_train_f1 0.5449  src_val_acc 0.3421 | snd 3.8981  tgt ACC 0.2189  AUROC 0.7205  MacroF 0.1537
+Epoch 590 [ refine] loss 6.2723  cls 0.6510  pr 3.7028  mg 0.4522  al(w=1.00) 3.6621  ent 1.1055  sep 0.0630  vx 0.0040  pl 0.0601 | src_train_f1 0.5712  src_val_acc 0.3474 | snd 3.8878  tgt ACC 0.2195  AUROC 0.7237  MacroF 0.1507
+Epoch 595 [ refine] loss 6.2178  cls 0.6153  pr 3.6985  mg 0.4524  al(w=1.00) 3.6711  ent 1.0532  sep 0.0632  vx 0.0205  pl 0.0532 | src_train_f1 0.5679  src_val_acc 0.3579 | snd 3.9059  tgt ACC 0.2246  AUROC 0.7249  MacroF 0.1606
+  [select] W0: w 0.49 (d 0.700)  W1: w 0.83 (d 0.648)  W2: w 1.09 (d 0.621)  W3: w 1.50 (d 0.589)  W4: w 1.08 (d 0.622)
+Epoch 600 [ refine] loss 6.3095  cls 0.6482  pr 3.6852  mg 0.4508  al(w=1.00) 3.6848  ent 1.1523  sep 0.0634  vx 0.0078  pl 0.0550 | src_train_f1 0.5913  src_val_acc 0.3500 | snd 3.8726  tgt ACC 0.2237  AUROC 0.7227  MacroF 0.1572
+Epoch 605 [ refine] loss 6.3546  cls 0.6529  pr 3.6739  mg 0.4473  al(w=1.00) 3.6951  ent 1.2192  sep 0.0636  vx 0.0122  pl 0.0700 | src_train_f1 0.5896  src_val_acc 0.3553 | snd 3.8995  tgt ACC 0.2201  AUROC 0.7215  MacroF 0.1575
+Epoch 610 [ refine] loss 6.2072  cls 0.6037  pr 3.6593  mg 0.4376  al(w=1.00) 3.6605  ent 1.1114  sep 0.0637  vx 0.0040  pl 0.0640 | src_train_f1 0.5937  src_val_acc 0.3474 | snd 3.8886  tgt ACC 0.2210  AUROC 0.7212  MacroF 0.1563
+Epoch 615 [ refine] loss 6.1777  cls 0.6093  pr 3.6757  mg 0.4502  al(w=1.00) 3.6495  ent 1.0413  sep 0.0639  vx 0.0219  pl 0.0604 | src_train_f1 0.5892  src_val_acc 0.3500 | snd 3.8668  tgt ACC 0.2195  AUROC 0.7231  MacroF 0.1524
+  [select] W0: w 0.49 (d 0.699)  W1: w 0.81 (d 0.648)  W2: w 1.09 (d 0.618)  W3: w 1.53 (d 0.585)  W4: w 1.08 (d 0.619)
+Epoch 620 [ refine] loss 6.2709  cls 0.6445  pr 3.6653  mg 0.4475  al(w=1.00) 3.6690  ent 1.1247  sep 0.0641  vx 0.0094  pl 0.0707 | src_train_f1 0.6027  src_val_acc 0.3474 | snd 3.8948  tgt ACC 0.2207  AUROC 0.7227  MacroF 0.1539
+Epoch 625 [ refine] loss 6.1187  cls 0.6127  pr 3.6492  mg 0.4444  al(w=1.00) 3.5953  ent 1.0456  sep 0.0643  vx 0.0134  pl 0.0607 | src_train_f1 0.5937  src_val_acc 0.3395 | snd 3.9136  tgt ACC 0.2219  AUROC 0.7225  MacroF 0.1528
+Epoch 630 [ refine] loss 6.3380  cls 0.6738  pr 3.6560  mg 0.4408  al(w=1.00) 3.6913  ent 1.1651  sep 0.0644  vx 0.0117  pl 0.0822 | src_train_f1 0.5578  src_val_acc 0.3342 | snd 3.9429  tgt ACC 0.2164  AUROC 0.7214  MacroF 0.1478
+Epoch 635 [ refine] loss 6.1939  cls 0.6416  pr 3.6635  mg 0.4500  al(w=1.00) 3.6158  ent 1.0817  sep 0.0646  vx 0.0242  pl 0.0638 | src_train_f1 0.6067  src_val_acc 0.3474 | snd 3.9535  tgt ACC 0.2167  AUROC 0.7178  MacroF 0.1492
+  [select] W0: w 0.52 (d 0.683)  W1: w 0.78 (d 0.641)  W2: w 1.19 (d 0.600)  W3: w 1.42 (d 0.582)  W4: w 1.09 (d 0.608)
+Epoch 640 [ refine] loss 6.2742  cls 0.6291  pr 3.6465  mg 0.4467  al(w=1.00) 3.6917  ent 1.1281  sep 0.0648  vx 0.0066  pl 0.0659 | src_train_f1 0.5790  src_val_acc 0.3342 | snd 3.9382  tgt ACC 0.2161  AUROC 0.7177  MacroF 0.1466
+Epoch 645 [ refine] loss 6.2529  cls 0.6314  pr 3.6475  mg 0.4480  al(w=1.00) 3.6720  ent 1.1204  sep 0.0650  vx 0.0209  pl 0.0555 | src_train_f1 0.5987  src_val_acc 0.3421 | snd 3.9304  tgt ACC 0.2170  AUROC 0.7174  MacroF 0.1494
+Epoch 650 [ refine] loss 6.0864  cls 0.6208  pr 3.6389  mg 0.4400  al(w=1.00) 3.5691  ent 1.0252  sep 0.0652  vx 0.0094  pl 0.0644 | src_train_f1 0.6126  src_val_acc 0.3368 | snd 3.9052  tgt ACC 0.2182  AUROC 0.7171  MacroF 0.1490
+Epoch 655 [ refine] loss 6.0937  cls 0.5927  pr 3.6430  mg 0.4447  al(w=1.00) 3.5725  ent 1.0849  sep 0.0654  vx 0.0119  pl 0.0494 | src_train_f1 0.6030  src_val_acc 0.3395 | snd 3.9290  tgt ACC 0.2182  AUROC 0.7155  MacroF 0.1492
+  [select] W0: w 0.50 (d 0.690)  W1: w 0.79 (d 0.646)  W2: w 1.15 (d 0.608)  W3: w 1.61 (d 0.574)  W4: w 0.94 (d 0.628)
+Epoch 660 [ refine] loss 6.1044  cls 0.5761  pr 3.6122  mg 0.4314  al(w=1.00) 3.6031  ent 1.1075  sep 0.0656  vx 0.0050  pl 0.0592 | src_train_f1 0.6260  src_val_acc 0.3447 | snd 3.9459  tgt ACC 0.2192  AUROC 0.7147  MacroF 0.1496
+Epoch 665 [ refine] loss 6.0977  cls 0.6280  pr 3.6151  mg 0.4440  al(w=1.00) 3.5467  ent 1.0866  sep 0.0658  vx 0.0035  pl 0.0675 | src_train_f1 0.6157  src_val_acc 0.3447 | snd 3.9362  tgt ACC 0.2186  AUROC 0.7159  MacroF 0.1469
+Epoch 670 [ refine] loss 6.1481  cls 0.5903  pr 3.6034  mg 0.4338  al(w=1.00) 3.6045  ent 1.1642  sep 0.0660  vx 0.0195  pl 0.0665 | src_train_f1 0.5968  src_val_acc 0.3474 | snd 3.9210  tgt ACC 0.2222  AUROC 0.7176  MacroF 0.1482
+Epoch 675 [ refine] loss 6.1818  cls 0.6275  pr 3.6019  mg 0.4404  al(w=1.00) 3.6120  ent 1.1381  sep 0.0662  vx 0.0080  pl 0.0561 | src_train_f1 0.6013  src_val_acc 0.3342 | snd 3.9367  tgt ACC 0.2164  AUROC 0.7153  MacroF 0.1468
+  [select] W0: w 0.51 (d 0.696)  W1: w 0.85 (d 0.645)  W2: w 1.09 (d 0.620)  W3: w 1.54 (d 0.585)  W4: w 1.01 (d 0.628)
+Epoch 680 [ refine] loss 6.1603  cls 0.6072  pr 3.6218  mg 0.4449  al(w=1.00) 3.5821  ent 1.1795  sep 0.0664  vx 0.0120  pl 0.0530 | src_train_f1 0.6152  src_val_acc 0.3395 | snd 3.9337  tgt ACC 0.2222  AUROC 0.7169  MacroF 0.1514
+Epoch 685 [ refine] loss 6.0448  cls 0.5591  pr 3.6113  mg 0.4406  al(w=1.00) 3.5576  ent 1.1021  sep 0.0666  vx 0.0283  pl 0.0619 | src_train_f1 0.6238  src_val_acc 0.3447 | snd 3.9177  tgt ACC 0.2192  AUROC 0.7183  MacroF 0.1493
+Epoch 690 [ refine] loss 6.1003  cls 0.5632  pr 3.5951  mg 0.4337  al(w=1.00) 3.5800  ent 1.1795  sep 0.0668  vx 0.0123  pl 0.0456 | src_train_f1 0.5920  src_val_acc 0.3368 | snd 3.9204  tgt ACC 0.2192  AUROC 0.7185  MacroF 0.1472
+Epoch 695 [ refine] loss 6.0569  cls 0.5901  pr 3.5930  mg 0.4294  al(w=1.00) 3.5513  ent 1.1009  sep 0.0670  vx 0.0105  pl 0.0494 | src_train_f1 0.6130  src_val_acc 0.3368 | snd 3.9122  tgt ACC 0.2213  AUROC 0.7166  MacroF 0.1504
+  [select] W0: w 0.53 (d 0.677)  W1: w 0.83 (d 0.631)  W2: w 1.13 (d 0.601)  W3: w 1.60 (d 0.566)  W4: w 0.91 (d 0.622)
+Epoch 700 [ refine] loss 6.1852  cls 0.6190  pr 3.6038  mg 0.4468  al(w=1.00) 3.6186  ent 1.1362  sep 0.0671  vx 0.0173  pl 0.0715 | src_train_f1 0.5817  src_val_acc 0.3263 | snd 3.9318  tgt ACC 0.2167  AUROC 0.7155  MacroF 0.1441
+Epoch 705 [ refine] loss 6.0005  cls 0.5811  pr 3.5887  mg 0.4378  al(w=1.00) 3.5355  ent 1.0283  sep 0.0673  vx 0.0092  pl 0.0636 | src_train_f1 0.6147  src_val_acc 0.3237 | snd 3.9387  tgt ACC 0.2192  AUROC 0.7171  MacroF 0.1476
+Epoch 710 [ refine] loss 6.0925  cls 0.6055  pr 3.5951  mg 0.4421  al(w=1.00) 3.5770  ent 1.0720  sep 0.0675  vx 0.0037  pl 0.0649 | src_train_f1 0.6183  src_val_acc 0.3395 | snd 3.9205  tgt ACC 0.2210  AUROC 0.7161  MacroF 0.1487
+Epoch 715 [ refine] loss 6.1395  cls 0.6670  pr 3.5945  mg 0.4471  al(w=1.00) 3.5615  ent 1.0664  sep 0.0676  vx 0.0159  pl 0.0764 | src_train_f1 0.5991  src_val_acc 0.3342 | snd 3.9122  tgt ACC 0.2192  AUROC 0.7141  MacroF 0.1474
+  [select] W0: w 0.53 (d 0.679)  W1: w 0.88 (d 0.628)  W2: w 1.13 (d 0.604)  W3: w 1.61 (d 0.568)  W4: w 0.84 (d 0.634)
+Epoch 720 [ refine] loss 6.0722  cls 0.5789  pr 3.5816  mg 0.4365  al(w=1.00) 3.5843  ent 1.0799  sep 0.0678  vx 0.0146  pl 0.0806 | src_train_f1 0.5988  src_val_acc 0.3421 | snd 3.9433  tgt ACC 0.2143  AUROC 0.7113  MacroF 0.1449
+Epoch 725 [ refine] loss 6.0216  cls 0.5850  pr 3.5682  mg 0.4343  al(w=1.00) 3.5368  ent 1.0727  sep 0.0679  vx 0.0210  pl 0.0742 | src_train_f1 0.5927  src_val_acc 0.3289 | snd 3.9347  tgt ACC 0.2198  AUROC 0.7136  MacroF 0.1440
+Epoch 730 [ refine] loss 6.0142  cls 0.5373  pr 3.5698  mg 0.4316  al(w=1.00) 3.5355  ent 1.1581  sep 0.0680  vx 0.0155  pl 0.0695 | src_train_f1 0.6262  src_val_acc 0.3342 | snd 3.9199  tgt ACC 0.2176  AUROC 0.7150  MacroF 0.1402
+Epoch 735 [ refine] loss 5.9909  cls 0.5841  pr 3.5689  mg 0.4372  al(w=1.00) 3.5039  ent 1.0784  sep 0.0682  vx 0.0099  pl 0.0566 | src_train_f1 0.6391  src_val_acc 0.3395 | snd 3.9117  tgt ACC 0.2192  AUROC 0.7185  MacroF 0.1413
+  [select] W0: w 0.53 (d 0.675)  W1: w 0.90 (d 0.622)  W2: w 1.14 (d 0.599)  W3: w 1.49 (d 0.572)  W4: w 0.94 (d 0.618)
+Epoch 740 [ refine] loss 6.0155  cls 0.5413  pr 3.5657  mg 0.4351  al(w=1.00) 3.5635  ent 1.0966  sep 0.0683  vx 0.0082  pl 0.0623 | src_train_f1 0.6239  src_val_acc 0.3342 | snd 3.9226  tgt ACC 0.2161  AUROC 0.7186  MacroF 0.1411
+Epoch 745 [ refine] loss 5.9847  cls 0.5593  pr 3.5568  mg 0.4324  al(w=1.00) 3.5286  ent 1.0755  sep 0.0684  vx 0.0152  pl 0.0680 | src_train_f1 0.6450  src_val_acc 0.3289 | snd 3.9449  tgt ACC 0.2140  AUROC 0.7164  MacroF 0.1386
+Epoch 750 [ refine] loss 5.9965  cls 0.5490  pr 3.5316  mg 0.4261  al(w=1.00) 3.5288  ent 1.1394  sep 0.0686  vx 0.0083  pl 0.0736 | src_train_f1 0.6103  src_val_acc 0.3395 | snd 3.9507  tgt ACC 0.2195  AUROC 0.7137  MacroF 0.1442
+Epoch 755 [ refine] loss 6.0225  cls 0.5852  pr 3.5479  mg 0.4334  al(w=1.00) 3.5064  ent 1.1502  sep 0.0687  vx 0.0112  pl 0.0538 | src_train_f1 0.6424  src_val_acc 0.3368 | snd 3.9440  tgt ACC 0.2195  AUROC 0.7132  MacroF 0.1433
+  [select] W0: w 0.61 (d 0.653)  W1: w 0.89 (d 0.615)  W2: w 1.04 (d 0.599)  W3: w 1.53 (d 0.560)  W4: w 0.92 (d 0.611)
+Epoch 760 [ refine] loss 6.0209  cls 0.5750  pr 3.5221  mg 0.4214  al(w=1.00) 3.5345  ent 1.1366  sep 0.0689  vx 0.0107  pl 0.0624 | src_train_f1 0.6165  src_val_acc 0.3316 | snd 3.9485  tgt ACC 0.2176  AUROC 0.7149  MacroF 0.1449
+Epoch 765 [ refine] loss 5.9749  cls 0.5678  pr 3.5473  mg 0.4354  al(w=1.00) 3.4954  ent 1.1087  sep 0.0690  vx 0.0067  pl 0.0585 | src_train_f1 0.6505  src_val_acc 0.3211 | snd 3.9531  tgt ACC 0.2161  AUROC 0.7142  MacroF 0.1446
+Epoch 770 [ refine] loss 5.9604  cls 0.6027  pr 3.5306  mg 0.4317  al(w=1.00) 3.4785  ent 1.0560  sep 0.0692  vx 0.0107  pl 0.0645 | src_train_f1 0.6139  src_val_acc 0.3237 | snd 3.9500  tgt ACC 0.2161  AUROC 0.7136  MacroF 0.1410
+Epoch 775 [ refine] loss 5.9971  cls 0.5902  pr 3.5237  mg 0.4266  al(w=1.00) 3.4719  ent 1.1747  sep 0.0693  vx 0.0270  pl 0.0736 | src_train_f1 0.6089  src_val_acc 0.3263 | snd 3.9573  tgt ACC 0.2179  AUROC 0.7121  MacroF 0.1421
+  [select] W0: w 0.55 (d 0.655)  W1: w 0.91 (d 0.604)  W2: w 1.15 (d 0.581)  W3: w 1.52 (d 0.553)  W4: w 0.87 (d 0.608)
+Epoch 780 [ refine] loss 6.0284  cls 0.5880  pr 3.5155  mg 0.4309  al(w=1.00) 3.5059  ent 1.1755  sep 0.0695  vx 0.0171  pl 0.0651 | src_train_f1 0.6340  src_val_acc 0.3316 | snd 3.9510  tgt ACC 0.2152  AUROC 0.7097  MacroF 0.1403
+Epoch 785 [ refine] loss 6.0373  cls 0.5631  pr 3.4979  mg 0.4203  al(w=1.00) 3.5194  ent 1.2360  sep 0.0697  vx 0.0107  pl 0.0695 | src_train_f1 0.6356  src_val_acc 0.3263 | snd 3.9619  tgt ACC 0.2158  AUROC 0.7081  MacroF 0.1397
+Epoch 790 [ refine] loss 6.0659  cls 0.6239  pr 3.5038  mg 0.4320  al(w=1.00) 3.5162  ent 1.1657  sep 0.0699  vx 0.0039  pl 0.0521 | src_train_f1 0.6494  src_val_acc 0.3237 | snd 3.9589  tgt ACC 0.2155  AUROC 0.7092  MacroF 0.1409
+Epoch 795 [ refine] loss 5.9845  cls 0.5660  pr 3.4990  mg 0.4256  al(w=1.00) 3.4970  ent 1.1673  sep 0.0700  vx 0.0202  pl 0.0463 | src_train_f1 0.6388  src_val_acc 0.3342 | snd 3.9786  tgt ACC 0.2146  AUROC 0.7087  MacroF 0.1406
+  [select] W0: w 0.54 (d 0.646)  W1: w 0.87 (d 0.599)  W2: w 1.07 (d 0.578)  W3: w 1.57 (d 0.540)  W4: w 0.93 (d 0.592)
+Epoch 800 [ refine] loss 5.9867  cls 0.5372  pr 3.5073  mg 0.4345  al(w=1.00) 3.5377  ent 1.1321  sep 0.0702  vx 0.0102  pl 0.0547 | src_train_f1 0.6363  src_val_acc 0.3263 | snd 3.9537  tgt ACC 0.2140  AUROC 0.7099  MacroF 0.1391
+
+------------------------------------------------------------
+  Model selection (target labels never used to select)
+------------------------------------------------------------
+  criterion     epoch     score   tgt MacroF  vs oracle
+  src_val_acc     145    0.4211       0.1992    -0.0030 *
+  SND               5    7.5964       0.0083    -0.1940  
+  neg_entropy     795   -0.6518       0.1406    -0.0617  
+  last epoch      800         -       0.1391    -0.0632  
+  oracle          150         -       0.2023    +0.0000   (upper bound, not selectable)
+  -> reporting epoch 145 chosen by 'src_val'
+------------------------------------------------------------
+Restoring checkpoint from epoch 145 (selected by 'src_val').
+
+------------------------------------------------------------
+  Seed 42 results
+------------------------------------------------------------
+  Source    W0: ACC 0.5047  AUROC 0.9258  MacroF 0.3758
+  Source    W1: ACC 0.5092  AUROC 0.9250  MacroF 0.3669
+  Source    W2: ACC 0.4767  AUROC 0.9204  MacroF 0.3506
+  Source    W3: ACC 0.4792  AUROC 0.9202  MacroF 0.3702
+  Source    W4: ACC 0.4389  AUROC 0.9072  MacroF 0.3508
+  Target    W5: ACC 0.2652  AUROC 0.8048  MacroF 0.1992
+
+============================================================
+  Final results — W5, 1 run(s)
+============================================================
+  majority class : ACC 0.0579  AUROC 0.5000  MacroF 0.0016   (no-skill reference)
+  ACC           : 0.2652
+  AUROC         : 0.8048
+  MacroF        : 0.1992
+============================================================
+
+------------------------------------------------------------
+  Saved to runs/run_002_cora_full_W5
+------------------------------------------------------------
+  log.txt      the full console output of this run
+  config.json  every hyper-parameter + argv
+  history.csv  per-epoch metrics (the table view of the curves)
+  metrics.json final scores, per seed and aggregated
+  figures/     8 PNGs, each named run_002_cora_full_W5_<figure>.png
+  runs/index.csv updated — one row per run
+------------------------------------------------------------

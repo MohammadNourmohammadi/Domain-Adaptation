@@ -1,0 +1,25 @@
+============================================================
+  FGW prototype-graph Domain Adaptation  (Yelp)
+============================================================
+  Sources       : ['Madison', 'Glendale', 'Gilbert', 'LasVegas', 'Toronto']
+  Target        : Phoenix
+  Source labels : 10% (random draw; target 0%)
+  Selection     : src_val (20% of source labels held out)
+  Device        : cuda
+  feature_dim   : 100
+  num_classes   : 5
+  proj/hidden   : 128 / 64  (frozen SVD basis)
+  schedule      : warmup <= 150 (patience 40) -> adapt 120 -> refine, of 350 epochs
+  ego_size k    : 16
+  proto_size n_p: 8  (M=3 per class)
+  fgw alpha,eps : 0.5, 0.05
+  head/LN       : 64 / True
+  mode          : FGW domain adaptation
+============================================================
+
+Loading data ...
+  [Madison] cache missing -> building all Yelp city graphs (one-time, streams the raw dump)
+  [yelp] loading GLOVE vectors from data/yelp/glove/glove.6B.100d.txt ...
+  [yelp] loaded 400,001 GLOVE vectors (dim=100)
+  [yelp] scanning businesses ...
+  [yelp] streaming business from data/yelp/raw/yelp_dataset.tgz::yelp_academic_dataset_business.json

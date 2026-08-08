@@ -1,0 +1,6 @@
+run,dataset,target,sources,seeds,epochs,acc,acc_std,auroc,auroc_std,macro_f1,macro_f1_std,majority_f1,knn_augment,class_weighted_ce,stratified,selection,no_da,when,note
+run_002_cora_full_W5,cora_full,W5,W0+W1+W2+W3+W4,1,800,0.2652,0.0,0.8048,0.0,0.1992,0.0,0.0016,8,True,True,src_val,False,2026-08-08T12:36:02,
+run_006_arxiv_Y5,arxiv,Y5,Y0+Y1+Y2+Y3+Y4,1,300,0.5348,0.0,0.9047,0.0,0.2165,0.0,0.009,8,True,True,src_val,False,2026-08-08T13:16:13,
+run_007_yelp_Phoenix,yelp,Phoenix,Madison+Glendale+Gilbert+LasVegas+Toronto,1,300,0.856,0.0,0.9697,0.0,0.7142,0.0,0.1133,0,False,False,src_val,False,2026-08-08T13:33:27,
+run_008_twitch_RU,twitch,RU,DE+ENGB+ES+FR+PTBR,1,300,0.6369,0.0,0.5818,0.0,0.546,0.0,0.4301,0,False,False,src_val,False,2026-08-08T13:40:57,
+run_009_citation_DBLPv7,citation,DBLPv7,ACMv9+Citationv1,1,300,0.69,0.0,0.9161,0.0,0.647,0.0,0.0992,0,False,False,src_val,False,2026-08-08T13:46:55,
